@@ -244,12 +244,16 @@ export function buildProgram() {
       "Interactive wizard to set up the gateway, workspace, and skills",
     )
     .option("--workspace <dir>", "Agent workspace directory (default: ~/clawd)")
+    .option(
+      "--reset",
+      "Reset config + credentials + sessions + workspace before running wizard",
+    )
     .option("--non-interactive", "Run without prompts", false)
     .option("--flow <flow>", "Wizard flow: quickstart|advanced")
     .option("--mode <mode>", "Wizard mode: local|remote")
     .option(
       "--auth-choice <choice>",
-      "Auth: setup-token|claude-cli|token|openai-codex|openai-api-key|codex-cli|antigravity|gemini-api-key|zai-api-key|apiKey|minimax-cloud|minimax-api|minimax|opencode-zen|skip",
+      "Auth: setup-token|claude-cli|token|openai-codex|openai-api-key|openrouter-api-key|codex-cli|antigravity|gemini-api-key|zai-api-key|apiKey|minimax-cloud|minimax-api|minimax|opencode-zen|skip",
     )
     .option(
       "--token-provider <id>",
@@ -269,6 +273,7 @@ export function buildProgram() {
     )
     .option("--anthropic-api-key <key>", "Anthropic API key")
     .option("--openai-api-key <key>", "OpenAI API key")
+    .option("--openrouter-api-key <key>", "OpenRouter API key")
     .option("--gemini-api-key <key>", "Gemini API key")
     .option("--zai-api-key <key>", "Z.AI API key")
     .option("--minimax-api-key <key>", "MiniMax API key")
@@ -315,6 +320,7 @@ export function buildProgram() {
               | "token"
               | "openai-codex"
               | "openai-api-key"
+              | "openrouter-api-key"
               | "codex-cli"
               | "antigravity"
               | "gemini-api-key"
@@ -332,6 +338,7 @@ export function buildProgram() {
             tokenExpiresIn: opts.tokenExpiresIn as string | undefined,
             anthropicApiKey: opts.anthropicApiKey as string | undefined,
             openaiApiKey: opts.openaiApiKey as string | undefined,
+            openrouterApiKey: opts.openrouterApiKey as string | undefined,
             geminiApiKey: opts.geminiApiKey as string | undefined,
             zaiApiKey: opts.zaiApiKey as string | undefined,
             minimaxApiKey: opts.minimaxApiKey as string | undefined,
@@ -438,6 +445,11 @@ export function buildProgram() {
       "Run without prompts (safe migrations only)",
       false,
     )
+    .option(
+      "--generate-gateway-token",
+      "Generate and configure a gateway token",
+      false,
+    )
     .option("--deep", "Scan system services for extra gateway installs", false)
     .action(async (opts) => {
       try {
@@ -447,6 +459,7 @@ export function buildProgram() {
           repair: Boolean(opts.repair),
           force: Boolean(opts.force),
           nonInteractive: Boolean(opts.nonInteractive),
+          generateGatewayToken: Boolean(opts.generateGatewayToken),
           deep: Boolean(opts.deep),
         });
       } catch (err) {

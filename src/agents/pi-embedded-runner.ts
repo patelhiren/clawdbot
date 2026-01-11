@@ -66,8 +66,10 @@ import {
   resolveAuthProfileOrder,
   resolveModelAuthMode,
 } from "./model-auth.js";
+import { normalizeModelCompat } from "./model-compat.js";
 import { ensureClawdbotModelsJson } from "./models-config.js";
 import type { MessagingToolSend } from "./pi-embedded-messaging.js";
+import { acquireSessionWriteLock } from "./session-write-lock.js";
 
 export type { MessagingToolSend } from "./pi-embedded-messaging.js";
 
@@ -479,6 +481,10 @@ type EmbeddedSandboxInfo = {
   agentWorkspaceMount?: string;
   browserControlUrl?: string;
   browserNoVncUrl?: string;
+  hostBrowserAllowed?: boolean;
+  allowedControlUrls?: string[];
+  allowedControlHosts?: string[];
+  allowedControlPorts?: number[];
   elevated?: {
     allowed: boolean;
     defaultLevel: "on" | "off";
@@ -570,6 +576,10 @@ export function buildEmbeddedSandboxInfo(
       sandbox.workspaceAccess === "ro" ? "/agent" : undefined,
     browserControlUrl: sandbox.browser?.controlUrl,
     browserNoVncUrl: sandbox.browser?.noVncUrl,
+    hostBrowserAllowed: sandbox.browserAllowHostControl,
+    allowedControlUrls: sandbox.browserAllowedControlUrls,
+    allowedControlHosts: sandbox.browserAllowedControlHosts,
+    allowedControlPorts: sandbox.browserAllowedControlPorts,
     ...(elevatedAllowed
       ? {
           elevated: {
@@ -753,7 +763,7 @@ function resolveModel(
       modelRegistry,
     };
   }
-  return { model, authStorage, modelRegistry };
+  return { model: normalizeModelCompat(model), authStorage, modelRegistry };
 }
 
 export async function compactEmbeddedPiSession(params: {
@@ -944,70 +954,79 @@ export async function compactEmbeddedPiSession(params: {
         });
         const systemPrompt = createSystemPromptOverride(appendPrompt);
 
-        // Pre-warm session file to bring it into OS page cache
-        await prewarmSessionFile(params.sessionFile);
-        const sessionManager = SessionManager.open(params.sessionFile);
-        trackSessionManagerAccess(params.sessionFile);
-        const settingsManager = SettingsManager.create(
-          effectiveWorkspace,
-          agentDir,
-        );
-        const pruning = buildContextPruningExtension({
-          cfg: params.config,
-          sessionManager,
-          provider,
-          modelId,
-          model,
+        const sessionLock = await acquireSessionWriteLock({
+          sessionFile: params.sessionFile,
         });
-        const additionalExtensionPaths = pruning.additionalExtensionPaths;
-
-        const { builtInTools, customTools } = splitSdkTools({
-          tools,
-          sandboxEnabled: !!sandbox?.enabled,
-        });
-
-        let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
-        ({ session } = await createAgentSession({
-          cwd: resolvedWorkspace,
-          agentDir,
-          authStorage,
-          modelRegistry,
-          model,
-          thinkingLevel: mapThinkingLevel(params.thinkLevel),
-          systemPrompt,
-          tools: builtInTools,
-          customTools,
-          sessionManager,
-          settingsManager,
-          skills: [],
-          contextFiles: [],
-          additionalExtensionPaths,
-        }));
-
         try {
-          const prior = await sanitizeSessionHistory({
-            messages: session.messages,
-            modelApi: model.api,
+          // Pre-warm session file to bring it into OS page cache
+          await prewarmSessionFile(params.sessionFile);
+          const sessionManager = SessionManager.open(params.sessionFile);
+          trackSessionManagerAccess(params.sessionFile);
+          const settingsManager = SettingsManager.create(
+            effectiveWorkspace,
+            agentDir,
+          );
+          const pruning = buildContextPruningExtension({
+            cfg: params.config,
             sessionManager,
-            sessionId: params.sessionId,
+            provider,
+            modelId,
+            model,
           });
-          const validated = validateGeminiTurns(prior);
-          if (validated.length > 0) {
-            session.agent.replaceMessages(validated);
+          const additionalExtensionPaths = pruning.additionalExtensionPaths;
+
+          const { builtInTools, customTools } = splitSdkTools({
+            tools,
+            sandboxEnabled: !!sandbox?.enabled,
+          });
+
+          let session: Awaited<
+            ReturnType<typeof createAgentSession>
+          >["session"];
+          ({ session } = await createAgentSession({
+            cwd: resolvedWorkspace,
+            agentDir,
+            authStorage,
+            modelRegistry,
+            model,
+            thinkingLevel: mapThinkingLevel(params.thinkLevel),
+            systemPrompt,
+            tools: builtInTools,
+            customTools,
+            sessionManager,
+            settingsManager,
+            skills: [],
+            contextFiles: [],
+            additionalExtensionPaths,
+          }));
+
+          try {
+            const prior = await sanitizeSessionHistory({
+              messages: session.messages,
+              modelApi: model.api,
+              sessionManager,
+              sessionId: params.sessionId,
+            });
+            const validated = validateGeminiTurns(prior);
+            if (validated.length > 0) {
+              session.agent.replaceMessages(validated);
+            }
+            const result = await session.compact(params.customInstructions);
+            return {
+              ok: true,
+              compacted: true,
+              result: {
+                summary: result.summary,
+                firstKeptEntryId: result.firstKeptEntryId,
+                tokensBefore: result.tokensBefore,
+                details: result.details,
+              },
+            };
+          } finally {
+            session.dispose();
           }
-          const result = await session.compact(params.customInstructions);
-          return {
-            ok: true,
-            compacted: true,
-            result: {
-              summary: result.summary,
-              firstKeptEntryId: result.firstKeptEntryId,
-              tokensBefore: result.tokensBefore,
-              details: result.details,
-            },
-          };
         } finally {
-          session.dispose();
+          await sessionLock.release();
         }
       } catch (err) {
         return {
@@ -1325,6 +1344,9 @@ export async function runEmbeddedPiAgent(params: {
           });
           const systemPrompt = createSystemPromptOverride(appendPrompt);
 
+          const sessionLock = await acquireSessionWriteLock({
+            sessionFile: params.sessionFile,
+          });
           // Pre-warm session file to bring it into OS page cache
           await prewarmSessionFile(params.sessionFile);
           const sessionManager = SessionManager.open(params.sessionFile);
@@ -1382,6 +1404,7 @@ export async function runEmbeddedPiAgent(params: {
             }
           } catch (err) {
             session.dispose();
+            await sessionLock.release();
             throw err;
           }
           let aborted = Boolean(params.abortSignal?.aborted);
@@ -1411,6 +1434,7 @@ export async function runEmbeddedPiAgent(params: {
             });
           } catch (err) {
             session.dispose();
+            await sessionLock.release();
             throw err;
           }
           const {
@@ -1507,6 +1531,7 @@ export async function runEmbeddedPiAgent(params: {
               notifyEmbeddedRunEnded(params.sessionId);
             }
             session.dispose();
+            await sessionLock.release();
             params.abortSignal?.removeEventListener?.("abort", onAbort);
           }
           if (promptError && !aborted) {

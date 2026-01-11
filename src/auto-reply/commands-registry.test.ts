@@ -4,7 +4,9 @@ import {
   buildCommandText,
   getCommandDetection,
   listChatCommands,
+  listChatCommandsForConfig,
   listNativeCommandSpecs,
+  listNativeCommandSpecsForConfig,
   shouldHandleTextCommands,
 } from "./commands-registry.js";
 
@@ -18,13 +20,36 @@ describe("commands registry", () => {
     const specs = listNativeCommandSpecs();
     expect(specs.find((spec) => spec.name === "help")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "stop")).toBeTruthy();
+    expect(specs.find((spec) => spec.name === "whoami")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "compact")).toBeFalsy();
+  });
+
+  it("filters commands based on config flags", () => {
+    const disabled = listChatCommandsForConfig({
+      commands: { config: false, debug: false },
+    });
+    expect(disabled.find((spec) => spec.key === "config")).toBeFalsy();
+    expect(disabled.find((spec) => spec.key === "debug")).toBeFalsy();
+
+    const enabled = listChatCommandsForConfig({
+      commands: { config: true, debug: true },
+    });
+    expect(enabled.find((spec) => spec.key === "config")).toBeTruthy();
+    expect(enabled.find((spec) => spec.key === "debug")).toBeTruthy();
+
+    const nativeDisabled = listNativeCommandSpecsForConfig({
+      commands: { config: false, debug: false, native: true },
+    });
+    expect(nativeDisabled.find((spec) => spec.name === "config")).toBeFalsy();
+    expect(nativeDisabled.find((spec) => spec.name === "debug")).toBeFalsy();
   });
 
   it("detects known text commands", () => {
     const detection = getCommandDetection();
     expect(detection.exact.has("/commands")).toBe(true);
     expect(detection.exact.has("/compact")).toBe(true);
+    expect(detection.exact.has("/whoami")).toBe(true);
+    expect(detection.exact.has("/id")).toBe(true);
     for (const command of listChatCommands()) {
       for (const alias of command.textAliases) {
         expect(detection.exact.has(alias.toLowerCase())).toBe(true);

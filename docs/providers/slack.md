@@ -5,6 +5,22 @@ read_when: "Setting up Slack or debugging Slack socket mode"
 
 # Slack (socket mode)
 
+## Quick setup (beginner)
+1) Create a Slack app and enable **Socket Mode**.
+2) Create an **App Token** (`xapp-...`) and **Bot Token** (`xoxb-...`).
+3) Set tokens for Clawdbot and start the gateway.
+
+Minimal config:
+```json5
+{
+  slack: {
+    enabled: true,
+    appToken: "xapp-...",
+    botToken: "xoxb-..."
+  }
+}
+```
+
 ## Setup
 1) Create a Slack app (From scratch) in https://api.slack.com/apps.
 2) **Socket Mode** → toggle on. Then go to **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes** with scope `connections:write`. Copy the **App Token** (`xapp-...`).
@@ -23,6 +39,24 @@ read_when: "Setting up Slack or debugging Slack socket mode"
 Use the manifest below so scopes and events stay in sync.
 
 Multi-account support: use `slack.accounts` with per-account tokens and optional `name`. See [`gateway/configuration`](/gateway/configuration#telegramaccounts--discordaccounts--slackaccounts--signalaccounts--imessageaccounts) for the shared pattern.
+
+## Clawdbot config (minimal)
+
+Set tokens via env vars (recommended):
+- `SLACK_APP_TOKEN=xapp-...`
+- `SLACK_BOT_TOKEN=xoxb-...`
+
+Or via config:
+
+```json5
+{
+  slack: {
+    enabled: true,
+    appToken: "xapp-...",
+    botToken: "xoxb-..."
+  }
+}
+```
 
 ## History context
 - `slack.historyLimit` (or `slack.accounts.*.historyLimit`) controls how many recent channel/group messages are wrapped into the prompt.
@@ -221,8 +255,8 @@ For fine-grained control, use these tags in agent responses:
 
 ## Sessions + routing
 - DMs share the `main` session (like WhatsApp/Telegram).
-- Channels map to `slack:channel:<channelId>` sessions.
-- Slash commands use `slack:slash:<userId>` sessions.
+- Channels map to `agent:<agentId>:slack:channel:<channelId>` sessions.
+- Slash commands use `agent:<agentId>:slack:slash:<userId>` sessions (prefix configurable via `slack.slashCommand.sessionPrefix`).
 - Native command registration is controlled by `commands.native`; text commands require standalone `/...` messages and can be disabled with `commands.text: false`. Slack slash commands are managed in the Slack app and are not removed automatically. Use `commands.useAccessGroups: false` to bypass access-group checks for commands.
 - Full command list + config: [Slash commands](/tools/slash-commands)
 

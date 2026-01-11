@@ -4,6 +4,7 @@ enum GatewayLaunchAgentManager {
     private static let logger = Logger(subsystem: "com.clawdbot", category: "gateway.launchd")
     private static let supportedBindModes: Set<String> = ["loopback", "tailnet", "lan", "auto"]
     private static let legacyGatewayLaunchdLabel = "com.steipete.clawdbot.gateway"
+    private static let disableLaunchAgentMarker = ".clawdbot/disable-launchagent"
 
     private static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -50,6 +51,10 @@ enum GatewayLaunchAgentManager {
     }
 
     static func set(enabled: Bool, bundlePath: String, port: Int) async -> String? {
+        if enabled, self.isLaunchAgentWriteDisabled() {
+            self.logger.info("launchd enable skipped (attach-only or disable marker set)")
+            return nil
+        }
         if enabled {
             _ = await Launchctl.run(["bootout", "gui/\(getuid())/\(self.legacyGatewayLaunchdLabel)"])
             try? FileManager.default.removeItem(at: self.legacyPlistURL)
@@ -204,7 +209,20 @@ enum GatewayLaunchAgentManager {
     private static func preferredGatewayToken() -> String? {
         let raw = ProcessInfo.processInfo.environment["CLAWDBOT_GATEWAY_TOKEN"] ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        let root = ClawdbotConfigFile.loadDict()
+        if let gateway = root["gateway"] as? [String: Any],
+           let auth = gateway["auth"] as? [String: Any],
+           let token = auth["token"] as? String
+        {
+            let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     private static func preferredGatewayPassword() -> String? {
@@ -285,6 +303,17 @@ enum GatewayLaunchAgentManager {
         } else {
             self.logger.warning("launchd disable failed: \(msg)")
         }
+    }
+}
+
+extension GatewayLaunchAgentManager {
+    private static func isLaunchAgentWriteDisabled() -> Bool {
+        if UserDefaults.standard.bool(forKey: attachExistingGatewayOnlyKey) {
+            return true
+        }
+        let marker = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(self.disableLaunchAgentMarker)
+        return FileManager.default.fileExists(atPath: marker.path)
     }
 }
 

@@ -32,6 +32,10 @@ export function buildAgentSystemPrompt(params: {
     agentWorkspaceMount?: string;
     browserControlUrl?: string;
     browserNoVncUrl?: string;
+    hostBrowserAllowed?: boolean;
+    allowedControlUrls?: string[];
+    allowedControlHosts?: string[];
+    allowedControlPorts?: number[];
     elevated?: {
       allowed: boolean;
       defaultLevel: "on" | "off";
@@ -227,6 +231,7 @@ export function buildAgentSystemPrompt(params: {
       ? [
           "You are running in a sandboxed runtime (tools execute in Docker).",
           "Some tools may be unavailable due to sandbox policy.",
+          "Sub-agents stay sandboxed (no elevated/host access). Need outside-sandbox read/write? Don't spawn; ask first.",
           params.sandboxInfo.workspaceDir
             ? `Sandbox workspace: ${params.sandboxInfo.workspaceDir}`
             : "",
@@ -242,6 +247,26 @@ export function buildAgentSystemPrompt(params: {
             : "",
           params.sandboxInfo.browserNoVncUrl
             ? `Sandbox browser observer (noVNC): ${params.sandboxInfo.browserNoVncUrl}`
+            : "",
+          params.sandboxInfo.hostBrowserAllowed === true
+            ? "Host browser control: allowed."
+            : params.sandboxInfo.hostBrowserAllowed === false
+              ? "Host browser control: blocked."
+              : "",
+          params.sandboxInfo.allowedControlUrls?.length
+            ? `Browser control URL allowlist: ${params.sandboxInfo.allowedControlUrls.join(
+                ", ",
+              )}`
+            : "",
+          params.sandboxInfo.allowedControlHosts?.length
+            ? `Browser control host allowlist: ${params.sandboxInfo.allowedControlHosts.join(
+                ", ",
+              )}`
+            : "",
+          params.sandboxInfo.allowedControlPorts?.length
+            ? `Browser control port allowlist: ${params.sandboxInfo.allowedControlPorts.join(
+                ", ",
+              )}`
             : "",
           params.sandboxInfo.elevated?.allowed
             ? "Elevated bash is available for this session."

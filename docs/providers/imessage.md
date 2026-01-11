@@ -9,10 +9,28 @@ read_when:
 
 Status: external CLI integration. Gateway spawns `imsg rpc` (JSON-RPC over stdio).
 
+## Quick setup (beginner)
+1) Ensure Messages is signed in on this Mac.
+2) Install `imsg`:
+   - `brew install steipete/tap/imsg`
+3) Configure Clawdbot with `imessage.cliPath` and `imessage.dbPath`.
+4) Start the gateway and approve any macOS prompts (Automation + Full Disk Access).
+
+Minimal config:
+```json5
+{
+  imessage: {
+    enabled: true,
+    cliPath: "/usr/local/bin/imsg",
+    dbPath: "/Users/<you>/Library/Messages/chat.db"
+  }
+}
+```
+
 ## What it is
 - iMessage provider backed by `imsg` on macOS.
 - Deterministic routing: replies always go back to iMessage.
-- DMs share the agent's main session; groups are isolated (`imessage:group:<chat_id>`).
+- DMs share the agent's main session; groups are isolated (`agent:<agentId>:imessage:group:<chat_id>`).
 - If a multi-participant thread arrives with `is_group=false`, you can still isolate it by `chat_id` using `imessage.groups` (see “Group-ish threads” below).
 
 ## Requirements
@@ -104,7 +122,7 @@ Groups:
 Some iMessage threads can have multiple participants but still arrive with `is_group=false` depending on how Messages stores the chat identifier.
 
 If you explicitly configure a `chat_id` under `imessage.groups`, Clawdbot treats that thread as a “group” for:
-- session isolation (separate `imessage:group:<chat_id>` session key)
+- session isolation (separate `agent:<agentId>:imessage:group:<chat_id>` session key)
 - group allowlisting / mention gating behavior
 
 Example:

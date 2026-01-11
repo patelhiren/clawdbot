@@ -110,6 +110,31 @@ Keep config + state private on the gateway host:
 
 `clawdbot doctor` can warn and offer to tighten these permissions.
 
+### 0.5) Lock down the Gateway WebSocket (local auth)
+
+Gateway auth is **only** enforced when you set `gateway.auth`. If it’s unset,
+loopback WS clients are unauthenticated — any local process can connect and call
+`config.apply`.
+
+The onboarding wizard now generates a token by default (even for loopback) so
+local clients must authenticate. If you skip the wizard or remove auth, you’re
+back to open loopback.
+
+Set a token so **all** WS clients must authenticate:
+
+```json5
+{
+  gateway: {
+    auth: { mode: "token", token: "your-token" }
+  }
+}
+```
+
+Doctor can generate one for you: `clawdbot doctor --generate-gateway-token`.
+
+Note: `gateway.remote.token` is **only** for remote CLI calls; it does not
+protect local WS access.
+
 ### 1) DMs: pairing by default
 
 ```json5
@@ -173,6 +198,15 @@ Also consider agent workspace access inside the sandbox:
 - `agents.defaults.sandbox.workspaceAccess: "rw"` mounts the agent workspace read/write at `/workspace`
 
 Important: `tools.elevated` is the global baseline escape hatch that runs bash on the host. Keep `tools.elevated.allowFrom` tight and don’t enable it for strangers. You can further restrict elevated per agent via `agents.list[].tools.elevated`. See [Elevated Mode](/tools/elevated).
+
+## Browser control risks
+
+Enabling browser control gives the model the ability to drive a real browser.
+If that browser profile already contains logged-in sessions, the model can
+access those accounts and data. Treat browser profiles as **sensitive state**:
+- Prefer a dedicated profile for the agent (the default `clawd` profile).
+- Avoid pointing the agent at your personal daily-driver profile.
+- Keep host browser control disabled for sandboxed agents unless you trust them.
 
 ## Per-agent access profiles (multi-agent)
 

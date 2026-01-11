@@ -4,7 +4,6 @@ import {
   confirm as clackConfirm,
   intro as clackIntro,
   multiselect as clackMultiselect,
-  note as clackNote,
   outro as clackOutro,
   select as clackSelect,
   text as clackText,
@@ -17,7 +16,7 @@ import {
   resolveGatewayPort,
   writeConfigFile,
 } from "../config/config.js";
-import { GATEWAY_LAUNCH_AGENT_LABEL } from "../daemon/constants.js";
+import { resolveGatewayLaunchAgentLabel } from "../daemon/constants.js";
 import { resolveGatewayProgramArguments } from "../daemon/program-args.js";
 import { resolvePreferredNodePath } from "../daemon/runtime-paths.js";
 import { resolveGatewayService } from "../daemon/service.js";
@@ -26,6 +25,7 @@ import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
 import { listChatProviders } from "../providers/registry.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
+import { note } from "../terminal/note.js";
 import {
   stylePromptHint,
   stylePromptMessage,
@@ -90,8 +90,6 @@ const intro = (message: string) =>
   clackIntro(stylePromptTitle(message) ?? message);
 const outro = (message: string) =>
   clackOutro(stylePromptTitle(message) ?? message);
-const note = (message: string, title?: string) =>
-  clackNote(message, stylePromptTitle(title));
 const text = (params: Parameters<typeof clackText>[0]) =>
   clackText({
     ...params,
@@ -159,10 +157,15 @@ async function promptGatewayConfig(
     await select({
       message: "Gateway auth",
       options: [
-        { value: "off", label: "Off (loopback only)" },
-        { value: "token", label: "Token" },
+        {
+          value: "off",
+          label: "Off (loopback only)",
+          hint: "Not recommended unless you fully trust local processes",
+        },
+        { value: "token", label: "Token", hint: "Recommended default" },
         { value: "password", label: "Password" },
       ],
+      initialValue: "token",
     }),
     runtime,
   ) as "off" | "token" | "password";
@@ -335,7 +338,9 @@ async function maybeInstallDaemon(params: {
   daemonRuntime?: GatewayDaemonRuntime;
 }) {
   const service = resolveGatewayService();
-  const loaded = await service.isLoaded({ env: process.env });
+  const loaded = await service.isLoaded({
+    profile: process.env.CLAWDBOT_PROFILE,
+  });
   let shouldCheckLinger = false;
   let shouldInstall = true;
   let daemonRuntime = params.daemonRuntime ?? DEFAULT_GATEWAY_DAEMON_RUNTIME;
@@ -352,7 +357,10 @@ async function maybeInstallDaemon(params: {
       params.runtime,
     );
     if (action === "restart") {
-      await service.restart({ stdout: process.stdout });
+      await service.restart({
+        profile: process.env.CLAWDBOT_PROFILE,
+        stdout: process.stdout,
+      });
       shouldCheckLinger = true;
       shouldInstall = false;
     }
@@ -392,7 +400,9 @@ async function maybeInstallDaemon(params: {
       port: params.port,
       token: params.gatewayToken,
       launchdLabel:
-        process.platform === "darwin" ? GATEWAY_LAUNCH_AGENT_LABEL : undefined,
+        process.platform === "darwin"
+          ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
+          : undefined,
     });
     await service.install({
       env: process.env,

@@ -8,10 +8,29 @@ read_when:
 
 Status: production-ready for bot DMs + groups via grammY. Long-polling by default; webhook optional.
 
+## Quick setup (beginner)
+1) Create a bot with **@BotFather** and copy the token.
+2) Set the token:
+   - Env: `TELEGRAM_BOT_TOKEN=...`
+   - Or config: `telegram.botToken: "..."`.
+3) Start the gateway.
+4) DM access is pairing by default; approve the pairing code on first contact.
+
+Minimal config:
+```json5
+{
+  telegram: {
+    enabled: true,
+    botToken: "123:abc",
+    dmPolicy: "pairing"
+  }
+}
+```
+
 ## What it is
 - A Telegram Bot API provider owned by the Gateway.
 - Deterministic routing: replies go back to Telegram; the model never chooses providers.
-- DMs share the agent's main session; groups stay isolated (`telegram:group:<chatId>`).
+- DMs share the agent's main session; groups stay isolated (`agent:<agentId>:telegram:group:<chatId>`).
 
 ## Setup (fast path)
 ### 1) Create a bot token (BotFather)
@@ -37,9 +56,11 @@ Example:
 }
 ```
 
+Env option: `TELEGRAM_BOT_TOKEN=...` (works for the default account).
+
 Multi-account support: use `telegram.accounts` with per-account tokens and optional `name`. See [`gateway/configuration`](/gateway/configuration#telegramaccounts--discordaccounts--slackaccounts--signalaccounts--imessageaccounts) for the shared pattern.
 
-3) Start the gateway. Telegram starts when a `telegram` config section exists and a token is resolved.
+3) Start the gateway. Telegram starts when a token is resolved (env or config).
 4) DM access defaults to pairing. Approve the code when the bot is first contacted.
 5) For groups: add the bot, decide privacy/admin behavior (below), then set `telegram.groups` to control mention gating + allowlists.
 
@@ -132,7 +153,7 @@ Send in the group:
 
 Forward any message from the group to `@userinfobot` or `@getidsbot` on Telegram to see the chat ID (negative number like `-1001234567890`).
 
-**Tip:** For your own user ID, DM `@userinfobot` with `/start`. Useful for allowlists or debugging access control.
+**Tip:** For your own user ID, DM the bot and it will reply with your user ID (pairing message), or use `/whoami` once commands are enabled.
 
 **Privacy note:** `@userinfobot` is a third-party bot. If you prefer, use gateway logs (`clawdbot logs`) or Telegram developer tools to find user/chat IDs.
 
@@ -143,9 +164,7 @@ Telegram forum topics include a `message_thread_id` per message. Clawdbot:
 - Exposes `MessageThreadId` + `IsForum` in template context for routing/templating.
 - Topic-specific configuration is available under `telegram.groups.<chatId>.topics.<threadId>` (skills, allowlists, auto-reply, system prompts, disable).
 
-Private topics (DM forum mode) also include `message_thread_id`. Clawdbot:
-- Appends `:topic:<threadId>` to **DM** session keys for isolation.
-- Uses the thread id for draft streaming + replies.
+Private chats can include `message_thread_id` in some edge cases. Clawdbot keeps the DM session key unchanged, but still uses the thread id for replies/draft streaming when it is present.
 
 ## Access control (DMs + groups)
 
@@ -155,6 +174,7 @@ Private topics (DM forum mode) also include `message_thread_id`. Clawdbot:
   - `clawdbot pairing list telegram`
   - `clawdbot pairing approve telegram <CODE>`
 - Pairing is the default token exchange used for Telegram DMs. Details: [Pairing](/start/pairing)
+- `telegram.allowFrom` accepts numeric user IDs (recommended) or `@username` entries.
 
 ### Group access
 

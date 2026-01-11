@@ -169,6 +169,21 @@ export type WhatsAppConfig = {
       requireMention?: boolean;
     }
   >;
+  /** Acknowledgment reaction sent immediately upon message receipt. */
+  ackReaction?: {
+    /** Emoji to use for acknowledgment (e.g., "👀"). Empty = disabled. */
+    emoji?: string;
+    /** Send reactions in direct chats. Default: true. */
+    direct?: boolean;
+    /**
+     * Send reactions in group chats:
+     * - "always": react to all group messages
+     * - "mentions": react only when bot is mentioned
+     * - "never": never react in groups
+     * Default: "mentions"
+     */
+    group?: "always" | "mentions" | "never";
+  };
 };
 
 export type WhatsAppAccountConfig = {
@@ -202,6 +217,21 @@ export type WhatsAppAccountConfig = {
       requireMention?: boolean;
     }
   >;
+  /** Acknowledgment reaction sent immediately upon message receipt. */
+  ackReaction?: {
+    /** Emoji to use for acknowledgment (e.g., "👀"). Empty = disabled. */
+    emoji?: string;
+    /** Send reactions in direct chats. Default: true. */
+    direct?: boolean;
+    /**
+     * Send reactions in group chats:
+     * - "always": react to all group messages
+     * - "mentions": react only when bot is mentioned
+     * - "never": never react in groups
+     * Default: "mentions"
+     */
+    group?: "always" | "mentions" | "never";
+  };
 };
 
 export type BrowserProfileConfig = {
@@ -861,6 +891,26 @@ export type SandboxBrowserSettings = {
   headless?: boolean;
   enableNoVnc?: boolean;
   /**
+   * Allow sandboxed sessions to target the host browser control server.
+   * Default: false.
+   */
+  allowHostControl?: boolean;
+  /**
+   * Allowlist of exact control URLs for target="custom".
+   * When set, any custom controlUrl must match this list.
+   */
+  allowedControlUrls?: string[];
+  /**
+   * Allowlist of hostnames for control URLs (hostname only, no ports).
+   * When set, controlUrl hostname must match.
+   */
+  allowedControlHosts?: string[];
+  /**
+   * Allowlist of ports for control URLs.
+   * When set, controlUrl port must match (defaults: http=80, https=443).
+   */
+  allowedControlPorts?: number[];
+  /**
    * When true (default), sandboxed browser control will try to start/reattach to
    * the sandbox browser container when a tool call needs it.
    */
@@ -910,6 +960,13 @@ export type AgentToolsConfig = {
 export type ToolsConfig = {
   allow?: string[];
   deny?: string[];
+  audio?: {
+    transcription?: {
+      /** CLI args (template-enabled). */
+      args?: string[];
+      timeoutSeconds?: number;
+    };
+  };
   agentToAgent?: {
     /** Enable agent-to-agent messaging tools. Default: false. */
     enabled?: boolean;
@@ -1018,6 +1075,7 @@ export type BroadcastConfig = {
 };
 
 export type AudioConfig = {
+  /** @deprecated Use tools.audio.transcription instead. */
   transcription?: {
     // Optional CLI to turn inbound audio into text; templated args, must output transcript to stdout.
     command: string[];
@@ -1050,6 +1108,10 @@ export type CommandsConfig = {
   native?: boolean;
   /** Enable text command parsing (default: true). */
   text?: boolean;
+  /** Allow /config command (default: false). */
+  config?: boolean;
+  /** Allow /debug command (default: false). */
+  debug?: boolean;
   /** Allow restart commands/tools (default: false). */
   restart?: boolean;
   /** Enforce access-group allowlists/policies for commands (default: true). */
@@ -1327,6 +1389,51 @@ export type AgentContextPruningConfig = {
   };
 };
 
+export type CliBackendConfig = {
+  /** CLI command to execute (absolute path or on PATH). */
+  command: string;
+  /** Base args applied to every invocation. */
+  args?: string[];
+  /** Output parsing mode (default: json). */
+  output?: "json" | "text" | "jsonl";
+  /** Output parsing mode when resuming a CLI session. */
+  resumeOutput?: "json" | "text" | "jsonl";
+  /** Prompt input mode (default: arg). */
+  input?: "arg" | "stdin";
+  /** Max prompt length for arg mode (if exceeded, stdin is used). */
+  maxPromptArgChars?: number;
+  /** Extra env vars injected for this CLI. */
+  env?: Record<string, string>;
+  /** Env vars to remove before launching this CLI. */
+  clearEnv?: string[];
+  /** Flag used to pass model id (e.g. --model). */
+  modelArg?: string;
+  /** Model aliases mapping (config model id → CLI model id). */
+  modelAliases?: Record<string, string>;
+  /** Flag used to pass session id (e.g. --session-id). */
+  sessionArg?: string;
+  /** Extra args used when resuming a session (use {sessionId} placeholder). */
+  sessionArgs?: string[];
+  /** Alternate args to use when resuming a session (use {sessionId} placeholder). */
+  resumeArgs?: string[];
+  /** When to pass session ids. */
+  sessionMode?: "always" | "existing" | "none";
+  /** JSON fields to read session id from (in order). */
+  sessionIdFields?: string[];
+  /** Flag used to pass system prompt. */
+  systemPromptArg?: string;
+  /** System prompt behavior (append vs replace). */
+  systemPromptMode?: "append" | "replace";
+  /** When to send system prompt. */
+  systemPromptWhen?: "first" | "always" | "never";
+  /** Flag used to pass image paths. */
+  imageArg?: string;
+  /** How to pass multiple images. */
+  imageMode?: "repeat" | "list";
+  /** Serialize runs for this CLI. */
+  serialize?: boolean;
+};
+
 export type AgentDefaultsConfig = {
   /** Primary model and fallbacks (provider/model). */
   model?: AgentModelListConfig;
@@ -1342,6 +1449,8 @@ export type AgentDefaultsConfig = {
   userTimezone?: string;
   /** Optional display-only context window override (used for % in status UIs). */
   contextTokens?: number;
+  /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
+  cliBackends?: Record<string, CliBackendConfig>;
   /** Opt-in: prune old tool results from the LLM context to reduce token usage. */
   contextPruning?: AgentContextPruningConfig;
   /** Default thinking level when no /think directive is present. */

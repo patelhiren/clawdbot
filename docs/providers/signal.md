@@ -9,10 +9,30 @@ read_when:
 
 Status: external CLI integration. Gateway talks to `signal-cli` over HTTP JSON-RPC + SSE.
 
+## Quick setup (beginner)
+1) Use a **separate Signal number** for the bot (recommended).
+2) Install `signal-cli` (Java required).
+3) Link the bot device and start the daemon:
+   - `signal-cli link -n "Clawdbot"`
+4) Configure Clawdbot and start the gateway.
+
+Minimal config:
+```json5
+{
+  signal: {
+    enabled: true,
+    account: "+15551234567",
+    cliPath: "signal-cli",
+    dmPolicy: "pairing",
+    allowFrom: ["+15557654321"]
+  }
+}
+```
+
 ## What it is
 - Signal provider via `signal-cli` (not embedded libsignal).
 - Deterministic routing: replies always go back to Signal.
-- DMs share the agent's main session; groups are isolated (`signal:group:<groupId>`).
+- DMs share the agent's main session; groups are isolated (`agent:<agentId>:signal:group:<groupId>`).
 
 ## The number model (important)
 - The gateway connects to a **Signal device** (the `signal-cli` account).

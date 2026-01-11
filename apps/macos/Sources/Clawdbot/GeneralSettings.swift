@@ -30,10 +30,22 @@ struct GeneralSettings: View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 18) {
                 if !self.state.onboardingSeen {
-                    Text("Complete onboarding to finish setup")
-                        .font(.callout.weight(.semibold))
-                        .foregroundColor(.accentColor)
-                        .padding(.bottom, 2)
+                    Button {
+                        DebugActions.restartOnboarding()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Label("Complete onboarding to finish setup", systemImage: "arrow.counterclockwise")
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 2)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -152,13 +164,18 @@ struct GeneralSettings: View {
 
     private func requestLocationAuthorization(mode: ClawdbotLocationMode) async -> Bool {
         guard mode != .off else { return true }
+        guard CLLocationManager.locationServicesEnabled() else {
+            await MainActor.run { LocationPermissionHelper.openSettings() }
+            return false
+        }
+
         let status = CLLocationManager().authorizationStatus
-        // Note: macOS only supports authorizedAlways, not authorizedWhenInUse (iOS only)
-        if status == .authorizedAlways {
+        let requireAlways = mode == .always
+        if PermissionManager.isLocationAuthorized(status: status, requireAlways: requireAlways) {
             return true
         }
-        let updated = await LocationPermissionRequester.shared.request(always: mode == .always)
-        return updated == .authorizedAlways
+        let updated = await LocationPermissionRequester.shared.request(always: requireAlways)
+        return PermissionManager.isLocationAuthorized(status: updated, requireAlways: requireAlways)
     }
 
     private var connectionSection: some View {

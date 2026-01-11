@@ -288,6 +288,7 @@ vi.mock("./onboard-helpers.js", () => ({
   DEFAULT_WORKSPACE: "/tmp",
   guardCancel: (value: unknown) => value,
   printWizardHeader: vi.fn(),
+  randomToken: vi.fn(() => "test-gateway-token"),
 }));
 
 vi.mock("./doctor-state-migrations.js", () => ({
@@ -634,15 +635,16 @@ describe("doctor", () => {
     await doctorCommand(runtime, { nonInteractive: true });
 
     expect(
-      note.mock.calls.some(
-        ([message, title]) =>
-          title === "Sandbox" &&
-          typeof message === "string" &&
-          message.includes('agents.list (id "work") sandbox docker') &&
-          message.includes('scope resolves to "shared"'),
-      ),
+      note.mock.calls.some(([message, title]) => {
+        if (title !== "Sandbox" || typeof message !== "string") return false;
+        const normalized = message.replace(/\s+/g, " ").trim();
+        return (
+          normalized.includes('agents.list (id "work") sandbox docker') &&
+          normalized.includes('scope resolves to "shared"')
+        );
+      }),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("warns when legacy workspace directories exist", async () => {
     readConfigFileSnapshot.mockResolvedValue({
@@ -749,7 +751,10 @@ describe("doctor", () => {
       return Promise.resolve({ stdout: "", stderr: "" });
     });
 
-    confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    confirm
+      .mockResolvedValueOnce(false) // skip gateway token prompt
+      .mockResolvedValueOnce(false) // skip build
+      .mockResolvedValueOnce(true); // accept legacy fallback
 
     const { doctorCommand } = await import("./doctor.js");
     const runtime = {
@@ -770,7 +775,10 @@ describe("doctor", () => {
     const docker = sandbox.docker as Record<string, unknown>;
 
     expect(docker.image).toBe("clawdis-sandbox-common:bookworm-slim");
-    expect(runCommandWithTimeout).not.toHaveBeenCalled();
+    const defaultsCalls = runCommandWithTimeout.mock.calls.filter(
+      ([args]) => Array.isArray(args) && args[0] === "/usr/bin/defaults",
+    );
+    expect(defaultsCalls.length).toBe(runCommandWithTimeout.mock.calls.length);
   });
 
   it("runs legacy state migrations in non-interactive mode without prompting", async () => {

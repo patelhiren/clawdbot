@@ -89,6 +89,9 @@ const FIELD_LABELS: Record<string, string> = {
   "gateway.remote.password": "Remote Gateway Password",
   "gateway.auth.token": "Gateway Token",
   "gateway.auth.password": "Gateway Password",
+  "tools.audio.transcription.args": "Audio Transcription Args",
+  "tools.audio.transcription.timeoutSeconds":
+    "Audio Transcription Timeout (sec)",
   "gateway.controlUi.basePath": "Control UI Base Path",
   "gateway.http.endpoints.chatCompletions.enabled":
     "OpenAI Chat Completions Endpoint",
@@ -109,8 +112,11 @@ const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.humanDelay.mode": "Human Delay Mode",
   "agents.defaults.humanDelay.minMs": "Human Delay Min (ms)",
   "agents.defaults.humanDelay.maxMs": "Human Delay Max (ms)",
+  "agents.defaults.cliBackends": "CLI Backends",
   "commands.native": "Native Commands",
   "commands.text": "Text Commands",
+  "commands.config": "Allow /config",
+  "commands.debug": "Allow /debug",
   "commands.restart": "Allow Restart",
   "commands.useAccessGroups": "Use Access Groups",
   "ui.seamColor": "Accent Color",
@@ -156,7 +162,7 @@ const FIELD_HELP: Record<string, string> = {
   "gateway.remote.sshIdentity":
     "Optional SSH identity file path (passed to ssh -i).",
   "gateway.auth.token":
-    "Required for multi-machine access or non-loopback binds.",
+    "Recommended for all gateways; required for non-loopback binds.",
   "gateway.auth.password": "Required for Tailscale funnel.",
   "gateway.controlUi.basePath":
     "Optional URL prefix where the Control UI is served (e.g. /clawdbot).",
@@ -188,6 +194,8 @@ const FIELD_HELP: Record<string, string> = {
     "Optional image model (provider/model) used when the primary model lacks image input.",
   "agents.defaults.imageModel.fallbacks":
     "Ordered fallback image models (provider/model).",
+  "agents.defaults.cliBackends":
+    "Optional CLI backends for text-only fallback (claude-cli, etc.).",
   "agents.defaults.humanDelay.mode":
     'Delay style for block replies ("off", "natural", "custom").',
   "agents.defaults.humanDelay.minMs":
@@ -197,6 +205,10 @@ const FIELD_HELP: Record<string, string> = {
   "commands.native":
     "Register native commands with connectors that support it (Discord/Slack/Telegram).",
   "commands.text": "Allow text command parsing (slash commands only).",
+  "commands.config":
+    "Allow /config chat command to read/write config on disk (default: false).",
+  "commands.debug":
+    "Allow /debug chat command for runtime-only overrides (default: false).",
   "commands.restart":
     "Allow /restart and gateway restart tool actions (default: false).",
   "commands.useAccessGroups":

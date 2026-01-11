@@ -68,6 +68,7 @@ What you’ll choose:
 - **Providers**: WhatsApp QR login, Telegram/Discord bot tokens, etc.
 - **Daemon**: background install (launchd/systemd; WSL2 uses systemd)
   - **Runtime**: Node (recommended; required for WhatsApp) or Bun (faster, but incompatible with WhatsApp)
+- **Gateway token**: the wizard generates one by default (even on loopback) and stores it in `gateway.auth.token`.
 
 Wizard doc: [Wizard](/start/wizard)
 
@@ -95,6 +96,7 @@ clawdbot gateway --port 18789 --verbose
 ```
 
 Dashboard (local loopback): `http://127.0.0.1:18789/`
+If a token is configured, paste it into the Control UI settings (stored as `connect.params.auth.token`).
 
 ⚠️ **WhatsApp + Bun warning:** Baileys (WhatsApp Web library) uses a WebSocket
 path that is currently incompatible with Bun and can cause memory corruption on
@@ -158,14 +160,15 @@ node dist/entry.js gateway --port 18789 --verbose
 In a new terminal:
 
 ```bash
+clawdbot status
 clawdbot health
 clawdbot message send --to +15555550123 --message "Hello from Clawdbot"
 ```
 
 If `health` shows “no auth configured”, go back to the wizard and set OAuth/key auth — the agent won’t be able to respond without it.
 
-Local probe tip: `clawdbot status --deep` runs provider checks without needing a gateway connection.
-Gateway snapshot: `clawdbot providers status` shows what the gateway reports (use `status --deep` for local-only probes).
+Tip: `clawdbot status --all` is the best pasteable, read-only debug report.
+Health probes: `clawdbot health` (or `clawdbot status --deep`) asks the running gateway for a health snapshot.
 
 ## Next steps (optional, but great)
 

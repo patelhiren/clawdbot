@@ -124,9 +124,9 @@ clawdbot logs --follow
 ```
 
 If you’re supervised:
-- macOS launchd (app-bundled LaunchAgent): `launchctl kickstart -k gui/$UID/com.clawdbot.gateway`
-- Linux systemd user service: `systemctl --user restart clawdbot-gateway.service`
-- Windows (WSL2): `systemctl --user restart clawdbot-gateway.service`
+- macOS launchd (app-bundled LaunchAgent): `launchctl kickstart -k gui/$UID/com.clawdbot.gateway` (use `com.clawdbot.<profile>` if set)
+- Linux systemd user service: `systemctl --user restart clawdbot-gateway[-<profile>].service`
+- Windows (WSL2): `systemctl --user restart clawdbot-gateway[-<profile>].service`
   - `launchctl`/`systemctl` only work if the service is installed; otherwise run `clawdbot daemon install`.
 
 Runbook + exact service labels: [Gateway runbook](/gateway)
@@ -135,19 +135,21 @@ Runbook + exact service labels: [Gateway runbook](/gateway)
 
 ### Pin (global install)
 
-Install a known-good version:
+Install a known-good version (replace `<version>` with the last working one):
 
 ```bash
-npm i -g clawdbot@2026.1.9
+npm i -g clawdbot@<version>
 ```
 
 ```bash
-pnpm add -g clawdbot@2026.1.9
+pnpm add -g clawdbot@<version>
 ```
 
 ```bash
-bun add -g clawdbot@2026.1.9
+bun add -g clawdbot@<version>
 ```
+
+Tip: to see the current published version, run `npm view clawdbot version`.
 
 Then restart + re-run doctor:
 

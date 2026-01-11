@@ -16,7 +16,7 @@ import {
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   buildCommandText,
-  listNativeCommandSpecs,
+  listNativeCommandSpecsForConfig,
   shouldHandleTextCommands,
 } from "../auto-reply/commands-registry.js";
 import {
@@ -50,6 +50,7 @@ import {
   updateLastRoute,
 } from "../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../globals.js";
+import { createDedupeCache } from "../infra/dedupe.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { getChildLogger } from "../logging.js";
 import { type FetchLike, fetchRemoteMedia } from "../media/fetch.js";
@@ -516,24 +517,11 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     }
   >();
   const userCache = new Map<string, { name?: string }>();
-  const seenMessages = new Map<string, number>();
+  const seenMessages = createDedupeCache({ ttlMs: 60_000, maxSize: 500 });
 
   const markMessageSeen = (channelId: string | undefined, ts?: string) => {
     if (!channelId || !ts) return false;
-    const key = `${channelId}:${ts}`;
-    if (seenMessages.has(key)) return true;
-    seenMessages.set(key, Date.now());
-    if (seenMessages.size > 500) {
-      const cutoff = Date.now() - 60_000;
-      for (const [entry, seenAt] of seenMessages) {
-        if (seenAt < cutoff || seenMessages.size > 450) {
-          seenMessages.delete(entry);
-        } else {
-          break;
-        }
-      }
-    }
-    return false;
+    return seenMessages.check(`${channelId}:${ts}`);
   };
 
   const app = new App({
@@ -903,7 +891,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
       !wasMentioned &&
       !hasAnyMention &&
       commandAuthorized &&
-      hasControlCommand(message.text ?? "");
+      hasControlCommand(message.text ?? "", cfg);
     const effectiveWasMentioned = wasMentioned || shouldBypassMention;
     const canDetectMention = Boolean(botUserId) || mentionRegexes.length > 0;
     if (
@@ -1957,7 +1945,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
   };
 
   const nativeCommands =
-    cfg.commands?.native === true ? listNativeCommandSpecs() : [];
+    cfg.commands?.native === true ? listNativeCommandSpecsForConfig(cfg) : [];
   if (nativeCommands.length > 0) {
     for (const command of nativeCommands) {
       app.command(

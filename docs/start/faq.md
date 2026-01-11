@@ -7,30 +7,29 @@ Quick answers plus deeper troubleshooting for real-world setups (local dev, VPS,
 
 ## First 60 seconds if something's broken
 
-1) **Run the doctor**
+1) **Quick status (first check)**
    ```bash
-   clawdbot doctor
+   clawdbot status
    ```
-   Repairs/migrates config/state + runs health checks. See [Doctor](/gateway/doctor).
+   Fast local summary: OS + update, gateway/daemon reachability, agents/sessions, provider config + runtime issues (when gateway is reachable).
 
-2) **Daemon + port state**
+2) **Pasteable report (safe to share)**
+   ```bash
+   clawdbot status --all
+   ```
+   Read-only diagnosis with log tail (tokens redacted).
+
+3) **Daemon + port state**
    ```bash
    clawdbot daemon status
    ```
    Shows supervisor runtime vs RPC reachability, the probe target URL, and which config the daemon likely used.
 
-3) **Local probes**
+4) **Deep probes**
    ```bash
    clawdbot status --deep
    ```
-   Checks provider connectivity and local health. See [Health](/gateway/health).
-
-4) **Gateway snapshot**
-   ```bash
-   clawdbot health --json
-   clawdbot health --verbose   # shows the target URL + config path on errors
-   ```
-   Asks the running gateway for a full snapshot (WS-only). See [Health](/gateway/health).
+   Runs gateway health checks + provider probes (requires a reachable gateway). See [Health](/gateway/health).
 
 5) **Tail the latest log**
    ```bash
@@ -41,6 +40,19 @@ Quick answers plus deeper troubleshooting for real-world setups (local dev, VPS,
    tail -f "$(ls -t /tmp/clawdbot/clawdbot-*.log | head -1)"
    ```
    File logs are separate from service logs; see [Logging](/logging) and [Troubleshooting](/gateway/troubleshooting).
+
+6) **Run the doctor (repairs)**
+   ```bash
+   clawdbot doctor
+   ```
+   Repairs/migrates config/state + runs health checks. See [Doctor](/gateway/doctor).
+
+7) **Gateway snapshot**
+   ```bash
+   clawdbot health --json
+   clawdbot health --verbose   # shows the target URL + config path on errors
+   ```
+   Asks the running gateway for a full snapshot (WS-only). See [Health](/gateway/health).
 
 ## What is Clawdbot?
 
@@ -87,6 +99,14 @@ Node **>= 22** is required. `pnpm` is recommended; `bun` is optional.
 - **Health checks** and **skills** selection
 
 It also warns if your configured model is unknown or missing auth.
+
+### How does Anthropic "setup-token" auth work?
+
+The wizard can run `claude setup-token` on the gateway host (or you run it yourself), then stores the token as an auth profile for the **anthropic** provider. That profile is used for model calls the same way an API key or OAuth profile would be. If you already ran `claude setup-token`, pick **Anthropic token (paste setup-token)** and paste it. More detail: [OAuth](/concepts/oauth).
+
+### How does Codex auth work?
+
+Clawdbot supports **OpenAI Code (Codex)** via OAuth or by reusing your Codex CLI login (`~/.codex/auth.json`). The wizard can import the CLI login or run the OAuth flow and will set the default model to `openai-codex/gpt-5.2` when appropriate. See [Model providers](/concepts/model-providers) and [Wizard](/start/wizard).
 
 ### Can I use Bun?
 
@@ -198,12 +218,34 @@ Notes:
 - `gateway.remote.token` is for **remote CLI calls** only; it does not enable local gateway auth.
 - The Control UI authenticates via `connect.params.auth.token` (stored in app/UI settings). Avoid putting tokens in URLs.
 
+### Why do I need a token on localhost now?
+
+The wizard generates a gateway token by default (even on loopback) so **local WS clients must authenticate**. This blocks other local processes from calling the Gateway. Paste the token into the Control UI settings (or your client config) to connect.
+
+If you **really** want open loopback, remove `gateway.auth` from your config. Doctor can generate a token for you any time: `clawdbot doctor --generate-gateway-token`.
+
 ### Do I have to restart after changing config?
 
 The Gateway watches the config and supports hot‑reload:
 
 - `gateway.reload.mode: "hybrid"` (default): hot‑apply safe changes, restart for critical ones
 - `hot`, `restart`, `off` are also supported
+
+## Remote gateways + nodes
+
+### How do commands propagate between Telegram, the gateway, and nodes?
+
+Telegram messages are handled by the **gateway**. The gateway runs the agent and
+only then calls nodes over the **Bridge** when a node tool is needed:
+
+Telegram → Gateway → Agent → `node.*` → Node → Gateway → Telegram
+
+Nodes don’t see inbound provider traffic; they only receive bridge RPC calls.
+
+### Do nodes run a gateway daemon?
+
+No. Only **one gateway** should run per host. Nodes are peripherals that connect
+to the gateway (iOS/Android nodes, or macOS “node mode” in the menubar app).
 
 A full restart is required for `gateway`, `bridge`, `discovery`, and `canvasHost` changes.
 
@@ -592,6 +634,8 @@ Yes, but you must isolate:
 - `gateway.port` (unique ports)
 
 There are convenience CLI flags like `--dev` and `--profile <name>` that shift state dirs and ports.
+When using profiles, service names are suffixed (`com.clawdbot.<profile>`, `clawdbot-gateway-<profile>.service`,
+`Clawdbot Gateway (<profile>)`).
 
 ## Logging and debugging
 
@@ -613,8 +657,8 @@ clawdbot logs --follow
 
 Service/supervisor logs (when the gateway runs via launchd/systemd):
 - macOS: `$CLAWDBOT_STATE_DIR/logs/gateway.log` and `gateway.err.log` (default: `~/.clawdbot/logs/...`; profiles use `~/.clawdbot-<profile>/logs/...`)
-- Linux: `journalctl --user -u clawdbot-gateway.service -n 200 --no-pager`
-- Windows: `schtasks /Query /TN "Clawdbot Gateway" /V /FO LIST`
+- Linux: `journalctl --user -u clawdbot-gateway[-<profile>].service -n 200 --no-pager`
+- Windows: `schtasks /Query /TN "Clawdbot Gateway (<profile>)" /V /FO LIST`
 
 See [Troubleshooting](/gateway/troubleshooting#log-locations) for more.
 

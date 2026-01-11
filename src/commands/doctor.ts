@@ -1,9 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import {
-  intro as clackIntro,
-  note as clackNote,
-  outro as clackOutro,
-} from "@clack/prompts";
+import { intro as clackIntro, outro as clackOutro } from "@clack/prompts";
 import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
@@ -24,7 +22,7 @@ import {
   resolveGatewayPort,
   writeConfigFile,
 } from "../config/config.js";
-import { GATEWAY_LAUNCH_AGENT_LABEL } from "../daemon/constants.js";
+import { resolveGatewayLaunchAgentLabel } from "../daemon/constants.js";
 import { readLastGatewayErrorLine } from "../daemon/diagnostics.js";
 import { resolveGatewayProgramArguments } from "../daemon/program-args.js";
 import { resolvePreferredNodePath } from "../daemon/runtime-paths.js";
@@ -38,6 +36,7 @@ import { runGatewayUpdate } from "../infra/update-runner.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
+import { note } from "../terminal/note.js";
 import { stylePromptTitle } from "../terminal/prompt-style.js";
 import { sleep } from "../utils.js";
 import {
@@ -84,15 +83,17 @@ import {
 } from "./doctor-workspace.js";
 import { healthCommand } from "./health.js";
 import { formatHealthCheckFailure } from "./health-format.js";
-import { applyWizardMetadata, printWizardHeader } from "./onboard-helpers.js";
+import {
+  applyWizardMetadata,
+  printWizardHeader,
+  randomToken,
+} from "./onboard-helpers.js";
 import { ensureSystemdUserLingerInteractive } from "./systemd-linger.js";
 
 const intro = (message: string) =>
   clackIntro(stylePromptTitle(message) ?? message);
 const outro = (message: string) =>
   clackOutro(stylePromptTitle(message) ?? message);
-const note = (message: string, title?: string) =>
-  clackNote(message, stylePromptTitle(title));
 
 function resolveMode(cfg: ClawdbotConfig): "local" | "remote" {
   return cfg.gateway?.mode === "remote" ? "remote" : "local";
@@ -129,6 +130,53 @@ function noteOpencodeProviderOverrides(cfg: ClawdbotConfig) {
   );
 
   note(lines.join("\n"), "OpenCode Zen");
+}
+
+const MAC_APP_BUNDLE_ID = "com.clawdbot.mac";
+const MAC_ATTACH_EXISTING_ONLY_KEY = "clawdbot.gateway.attachExistingOnly";
+
+function resolveHomeDir(): string {
+  return process.env.HOME ?? os.homedir();
+}
+
+async function readMacAttachExistingOnly(): Promise<boolean | null> {
+  const result = await runCommandWithTimeout(
+    [
+      "/usr/bin/defaults",
+      "read",
+      MAC_APP_BUNDLE_ID,
+      MAC_ATTACH_EXISTING_ONLY_KEY,
+    ],
+    { timeoutMs: 2000 },
+  ).catch(() => null);
+  if (!result || result.code !== 0) return null;
+  const raw = result.stdout.trim().toLowerCase();
+  if (["1", "true", "yes"].includes(raw)) return true;
+  if (["0", "false", "no"].includes(raw)) return false;
+  return null;
+}
+
+async function noteMacLaunchAgentOverrides() {
+  if (process.platform !== "darwin") return;
+  const markerPath = path.join(
+    resolveHomeDir(),
+    ".clawdbot",
+    "disable-launchagent",
+  );
+  const hasMarker = fs.existsSync(markerPath);
+  const attachOnly = await readMacAttachExistingOnly();
+  if (!hasMarker && attachOnly !== true) return;
+
+  const lines = [
+    hasMarker ? `- LaunchAgent writes are disabled via ${markerPath}.` : null,
+    attachOnly === true
+      ? `- macOS app is set to Attach-only (${MAC_APP_BUNDLE_ID}:${MAC_ATTACH_EXISTING_ONLY_KEY}=true).`
+      : null,
+    "- To restore default behavior:",
+    `  rm ${markerPath}`,
+    `  defaults write ${MAC_APP_BUNDLE_ID} ${MAC_ATTACH_EXISTING_ONLY_KEY} -bool NO`,
+  ].filter((line): line is string => Boolean(line));
+  note(lines.join("\n"), "Gateway (macOS)");
 }
 
 async function detectClawdbotGitCheckout(
@@ -279,6 +327,45 @@ export async function doctorCommand(
   if (gatewayDetails.remoteFallbackNote) {
     note(gatewayDetails.remoteFallbackNote, "Gateway");
   }
+  if (resolveMode(cfg) === "local") {
+    const authMode = cfg.gateway?.auth?.mode;
+    const token =
+      typeof cfg.gateway?.auth?.token === "string"
+        ? cfg.gateway?.auth?.token.trim()
+        : "";
+    const needsToken =
+      authMode !== "password" && (authMode !== "token" || !token);
+    if (needsToken) {
+      note(
+        "Gateway auth is off or missing a token. Token auth is now the recommended default (including loopback).",
+        "Gateway auth",
+      );
+      const shouldSetToken =
+        options.generateGatewayToken === true
+          ? true
+          : options.nonInteractive === true
+            ? false
+            : await prompter.confirmRepair({
+                message: "Generate and configure a gateway token now?",
+                initialValue: true,
+              });
+      if (shouldSetToken) {
+        const nextToken = randomToken();
+        cfg = {
+          ...cfg,
+          gateway: {
+            ...cfg.gateway,
+            auth: {
+              ...cfg.gateway?.auth,
+              mode: "token",
+              token: nextToken,
+            },
+          },
+        };
+        note("Gateway token configured.", "Gateway auth");
+      }
+    }
+  }
 
   const legacyState = await detectLegacyStateMigrations({ cfg });
   if (legacyState.preview.length > 0) {
@@ -325,6 +412,7 @@ export async function doctorCommand(
     runtime,
     prompter,
   );
+  await noteMacLaunchAgentOverrides();
 
   await noteSecurityWarnings(cfg);
 
@@ -378,7 +466,9 @@ export async function doctorCommand(
     const service = resolveGatewayService();
     let loaded = false;
     try {
-      loaded = await service.isLoaded({ env: process.env });
+      loaded = await service.isLoaded({
+        profile: process.env.CLAWDBOT_PROFILE,
+      });
     } catch {
       loaded = false;
     }
@@ -460,7 +550,9 @@ export async function doctorCommand(
 
   if (!healthOk) {
     const service = resolveGatewayService();
-    const loaded = await service.isLoaded({ env: process.env });
+    const loaded = await service.isLoaded({
+      profile: process.env.CLAWDBOT_PROFILE,
+    });
     let serviceRuntime:
       | Awaited<ReturnType<typeof service.readRuntime>>
       | undefined;
@@ -519,7 +611,7 @@ export async function doctorCommand(
               cfg.gateway?.auth?.token ?? process.env.CLAWDBOT_GATEWAY_TOKEN,
             launchdLabel:
               process.platform === "darwin"
-                ? GATEWAY_LAUNCH_AGENT_LABEL
+                ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
                 : undefined,
           });
           await service.install({
@@ -549,13 +641,19 @@ export async function doctorCommand(
           initialValue: true,
         });
         if (start) {
-          await service.restart({ stdout: process.stdout });
+          await service.restart({
+            profile: process.env.CLAWDBOT_PROFILE,
+            stdout: process.stdout,
+          });
           await sleep(1500);
         }
       }
       if (process.platform === "darwin") {
+        const label = resolveGatewayLaunchAgentLabel(
+          process.env.CLAWDBOT_PROFILE,
+        );
         note(
-          `LaunchAgent loaded; stopping requires "clawdbot daemon stop" or launchctl bootout gui/$UID/${GATEWAY_LAUNCH_AGENT_LABEL}.`,
+          `LaunchAgent loaded; stopping requires "clawdbot daemon stop" or launchctl bootout gui/$UID/${label}.`,
           "Gateway",
         );
       }
@@ -565,7 +663,10 @@ export async function doctorCommand(
           initialValue: true,
         });
         if (restart) {
-          await service.restart({ stdout: process.stdout });
+          await service.restart({
+            profile: process.env.CLAWDBOT_PROFILE,
+            stdout: process.stdout,
+          });
           await sleep(1500);
           try {
             await healthCommand({ json: false, timeoutMs: 10_000 }, runtime);

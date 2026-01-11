@@ -9,56 +9,47 @@ import {
   DEFAULT_PROVIDER,
 } from "../agents/defaults.js";
 import { resolveConfiguredModelRef } from "../agents/model-selection.js";
-import { buildWorkspaceSkillStatus } from "../agents/skills-status.js";
 import { withProgress } from "../cli/progress.js";
-import {
-  loadConfig,
-  readConfigFileSnapshot,
-  resolveGatewayPort,
-} from "../config/config.js";
+import { loadConfig, resolveGatewayPort } from "../config/config.js";
 import {
   loadSessionStore,
   resolveMainSessionKey,
   resolveStorePath,
   type SessionEntry,
 } from "../config/sessions.js";
-import { readLastGatewayErrorLine } from "../daemon/diagnostics.js";
 import { resolveGatewayService } from "../daemon/service.js";
 import { buildGatewayConnectionDetails, callGateway } from "../gateway/call.js";
+import { normalizeControlUiBasePath } from "../gateway/control-ui.js";
 import { probeGateway } from "../gateway/probe.js";
 import { listAgentsForGateway } from "../gateway/session-utils.js";
 import { info } from "../globals.js";
 import { resolveClawdbotPackageRoot } from "../infra/clawdbot-root.js";
 import { resolveOsSummary } from "../infra/os-summary.js";
-import { formatPortDiagnostics, inspectPortUsage } from "../infra/ports.js";
 import { buildProviderSummary } from "../infra/provider-summary.js";
 import {
   formatUsageReportLines,
   loadProviderUsageSummary,
 } from "../infra/provider-usage.js";
 import { collectProvidersStatusIssues } from "../infra/providers-status-issues.js";
-import {
-  readRestartSentinel,
-  summarizeRestartSentinel,
-} from "../infra/restart-sentinel.js";
 import { peekSystemEvents } from "../infra/system-events.js";
+import { getTailnetHostname } from "../infra/tailscale.js";
 import {
   checkUpdateStatus,
   compareSemverStrings,
   type UpdateCheckResult,
 } from "../infra/update-check.js";
+import { runExec } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { renderTable } from "../terminal/table.js";
 import { theme } from "../terminal/theme.js";
 import { VERSION } from "../version.js";
 import { resolveWhatsAppAccount } from "../web/accounts.js";
 import { resolveHeartbeatSeconds } from "../web/reconnect.js";
-import {
-  getWebAuthAgeMs,
-  logWebSelfId,
-  webAuthExists,
-} from "../web/session.js";
+import { getWebAuthAgeMs, webAuthExists } from "../web/session.js";
 import type { HealthSummary } from "./health.js";
 import { resolveControlUiLinks } from "./onboard-helpers.js";
+import { formatGatewayAuthUsed } from "./status-all/format.js";
+import { buildProvidersTable } from "./status-all/providers.js";
 import { statusAllCommand } from "./status-all.js";
 
 export type SessionStatus = {
@@ -206,19 +197,20 @@ const formatDuration = (ms: number | null | undefined) => {
   return `${(ms / 1000).toFixed(1)}s`;
 };
 
-const formatContextUsage = (
-  total: number | null | undefined,
-  contextTokens: number | null | undefined,
-  remaining: number | null | undefined,
-  pct: number | null | undefined,
+const shortenText = (value: string, maxLen: number) => {
+  const chars = Array.from(value);
+  if (chars.length <= maxLen) return value;
+  return `${chars.slice(0, Math.max(0, maxLen - 1)).join("")}…`;
+};
+
+const formatTokensCompact = (
+  sess: Pick<SessionStatus, "totalTokens" | "contextTokens" | "percentUsed">,
 ) => {
-  const used = total ?? 0;
-  if (!contextTokens) {
-    return `tokens: ${formatKTokens(used)} used (ctx unknown)`;
-  }
-  const left = remaining ?? Math.max(0, contextTokens - used);
-  const pctLabel = pct != null ? `${pct}%` : "?%";
-  return `tokens: ${formatKTokens(used)} used, ${formatKTokens(left)} left of ${formatKTokens(contextTokens)} (${pctLabel})`;
+  const used = sess.totalTokens ?? 0;
+  const ctx = sess.contextTokens;
+  if (!ctx) return `${formatKTokens(used)} used`;
+  const pctLabel = sess.percentUsed != null ? `${sess.percentUsed}%` : "?%";
+  return `${formatKTokens(used)}/${formatKTokens(ctx)} (${pctLabel})`;
 };
 
 const classifyKey = (
@@ -243,6 +235,7 @@ const formatDaemonRuntimeShort = (runtime?: {
   pid?: number;
   state?: string;
   detail?: string;
+  missingUnit?: boolean;
 }) => {
   if (!runtime) return null;
   const status = runtime.status ?? "unknown";
@@ -251,22 +244,40 @@ const formatDaemonRuntimeShort = (runtime?: {
   if (runtime.state && runtime.state.toLowerCase() !== status) {
     details.push(`state ${runtime.state}`);
   }
-  if (runtime.detail) details.push(runtime.detail);
+  const detail = runtime.detail?.replace(/\s+/g, " ").trim() || "";
+  const noisyLaunchctlDetail =
+    runtime.missingUnit === true &&
+    detail.toLowerCase().includes("could not find service");
+  if (detail && !noisyLaunchctlDetail) details.push(detail);
   return details.length > 0 ? `${status} (${details.join(", ")})` : status;
 };
 
-async function getDaemonShortLine(): Promise<string | null> {
+async function getDaemonStatusSummary(): Promise<{
+  label: string;
+  installed: boolean | null;
+  loadedText: string;
+  runtimeShort: string | null;
+}> {
   try {
     const service = resolveGatewayService();
-    const [loaded, runtime] = await Promise.all([
-      service.isLoaded({ env: process.env }).catch(() => false),
+    const [loaded, runtime, command] = await Promise.all([
+      service
+        .isLoaded({ profile: process.env.CLAWDBOT_PROFILE })
+        .catch(() => false),
       service.readRuntime(process.env).catch(() => undefined),
+      service.readCommand(process.env).catch(() => null),
     ]);
+    const installed = command != null;
     const loadedText = loaded ? service.loadedText : service.notLoadedText;
     const runtimeShort = formatDaemonRuntimeShort(runtime);
-    return `Daemon: ${service.label} ${loadedText}${runtimeShort ? `, ${runtimeShort}` : ""}. Details: clawdbot daemon status`;
+    return { label: service.label, installed, loadedText, runtimeShort };
   } catch {
-    return "Daemon: unknown. Details: clawdbot daemon status";
+    return {
+      label: "Daemon",
+      installed: null,
+      loadedText: "unknown",
+      runtimeShort: null,
+    };
   }
 }
 
@@ -449,20 +460,31 @@ function formatUpdateOneLiner(update: UpdateCheckResult): string {
       }
     }
     if (update.git.fetchOk === false) parts.push("fetch failed");
+
+    if (update.registry?.latestVersion) {
+      const cmp = compareSemverStrings(VERSION, update.registry.latestVersion);
+      if (cmp === 0) parts.push(`npm latest ${update.registry.latestVersion}`);
+      else if (cmp != null && cmp < 0)
+        parts.push(`npm update ${update.registry.latestVersion}`);
+      else
+        parts.push(`npm latest ${update.registry.latestVersion} (local newer)`);
+    } else if (update.registry?.error) {
+      parts.push("npm latest unknown");
+    }
   } else {
     parts.push(
       update.packageManager !== "unknown" ? update.packageManager : "pkg",
     );
     if (update.registry?.latestVersion) {
       const cmp = compareSemverStrings(VERSION, update.registry.latestVersion);
-      if (cmp === 0) parts.push(`latest ${update.registry.latestVersion}`);
+      if (cmp === 0) parts.push(`npm latest ${update.registry.latestVersion}`);
       else if (cmp != null && cmp < 0) {
-        parts.push(`update available ${update.registry.latestVersion}`);
+        parts.push(`npm update ${update.registry.latestVersion}`);
       } else {
-        parts.push(`latest ${update.registry.latestVersion}`);
+        parts.push(`npm latest ${update.registry.latestVersion} (local newer)`);
       }
     } else if (update.registry?.error) {
-      parts.push("latest unknown");
+      parts.push("npm latest unknown");
     }
   }
 
@@ -472,26 +494,6 @@ function formatUpdateOneLiner(update: UpdateCheckResult): string {
     if (update.deps.status === "stale") parts.push("deps stale");
   }
   return `Update: ${parts.join(" · ")}`;
-}
-
-function formatCheckLine(params: {
-  ok: boolean;
-  label: string;
-  detail?: string | null;
-  warn?: boolean;
-}) {
-  const symbol = params.ok
-    ? theme.success("\u2713")
-    : params.warn
-      ? theme.warn("!")
-      : theme.error("\u2717");
-  const label = params.ok
-    ? theme.success(params.label)
-    : params.warn
-      ? theme.warn(params.label)
-      : theme.error(params.label);
-  const detail = params.detail?.trim() ? ` ${theme.muted(params.detail)}` : "";
-  return `${symbol} ${label}${detail}`;
 }
 
 const buildFlags = (entry: SessionEntry): string[] => {
@@ -535,13 +537,27 @@ export async function statusCommand(
   const scan = await withProgress(
     {
       label: "Scanning status…",
-      total: 6,
+      total: 9,
       enabled: opts.json !== true,
     },
     async (progress) => {
       progress.setLabel("Loading config…");
       const cfg = loadConfig();
       const osSummary = resolveOsSummary();
+      progress.tick();
+
+      progress.setLabel("Checking Tailscale…");
+      const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
+      const tailscaleDns =
+        tailscaleMode === "off"
+          ? null
+          : await getTailnetHostname((cmd, args) =>
+              runExec(cmd, args, { timeoutMs: 1200, maxBuffer: 200_000 }),
+            ).catch(() => null);
+      const tailscaleHttpsUrl =
+        tailscaleMode !== "off" && tailscaleDns
+          ? `https://${tailscaleDns}${normalizeControlUiBasePath(cfg.gateway?.controlUi?.basePath)}`
+          : null;
       progress.tick();
 
       progress.setLabel("Checking for updates…");
@@ -582,6 +598,33 @@ export async function statusCommand(
         : null;
       progress.tick();
 
+      progress.setLabel("Querying provider status…");
+      const providersStatus = gatewayReachable
+        ? await callGateway<Record<string, unknown>>({
+            method: "providers.status",
+            params: {
+              probe: false,
+              timeoutMs: Math.min(8000, opts.timeoutMs ?? 10_000),
+            },
+            timeoutMs: Math.min(
+              opts.all ? 5000 : 2500,
+              opts.timeoutMs ?? 10_000,
+            ),
+          }).catch(() => null)
+        : null;
+      const providerIssues = providersStatus
+        ? collectProvidersStatusIssues(providersStatus)
+        : [];
+      progress.tick();
+
+      progress.setLabel("Summarizing providers…");
+      const providers = await buildProvidersTable(cfg, {
+        // Show token previews in regular status; keep `status --all` redacted.
+        // Set `CLAWDBOT_SHOW_SECRETS=0` to force redaction.
+        showSecrets: process.env.CLAWDBOT_SHOW_SECRETS?.trim() !== "0",
+      });
+      progress.tick();
+
       progress.setLabel("Reading sessions…");
       const summary = await getStatusSummary();
       progress.tick();
@@ -592,6 +635,9 @@ export async function statusCommand(
       return {
         cfg,
         osSummary,
+        tailscaleMode,
+        tailscaleDns,
+        tailscaleHttpsUrl,
         update,
         gatewayConnection,
         remoteUrlMissing,
@@ -599,7 +645,9 @@ export async function statusCommand(
         gatewayProbe,
         gatewayReachable,
         gatewaySelf,
+        providerIssues,
         agentStatus,
+        providers,
         summary,
       };
     },
@@ -608,6 +656,9 @@ export async function statusCommand(
   const {
     cfg,
     osSummary,
+    tailscaleMode,
+    tailscaleDns,
+    tailscaleHttpsUrl,
     update,
     gatewayConnection,
     remoteUrlMissing,
@@ -615,7 +666,9 @@ export async function statusCommand(
     gatewayProbe,
     gatewayReachable,
     gatewaySelf,
+    providerIssues,
     agentStatus,
+    providers,
     summary,
   } = scan;
   const usage = opts.usage
@@ -671,40 +724,48 @@ export async function statusCommand(
     return;
   }
 
-  if (opts.verbose || opts.all) {
+  const rich = true;
+  const muted = (value: string) => (rich ? theme.muted(value) : value);
+  const ok = (value: string) => (rich ? theme.success(value) : value);
+  const warn = (value: string) => (rich ? theme.warn(value) : value);
+
+  if (opts.verbose) {
     const details = buildGatewayConnectionDetails();
     runtime.log(info("Gateway connection:"));
-    for (const line of details.message.split("\n")) {
-      runtime.log(`  ${line}`);
-    }
+    for (const line of details.message.split("\n")) runtime.log(`  ${line}`);
+    runtime.log("");
   }
 
-  const controlUiEnabled = cfg.gateway?.controlUi?.enabled ?? true;
-  if (!controlUiEnabled) {
-    runtime.log(info("Dashboard: disabled"));
-  } else {
+  const tableWidth = Math.max(60, (process.stdout.columns ?? 120) - 1);
+
+  const dashboard = (() => {
+    const controlUiEnabled = cfg.gateway?.controlUi?.enabled ?? true;
+    if (!controlUiEnabled) return "disabled";
     const links = resolveControlUiLinks({
       port: resolveGatewayPort(cfg),
       bind: cfg.gateway?.bind,
       basePath: cfg.gateway?.controlUi?.basePath,
     });
-    runtime.log(info(`Dashboard: ${links.httpUrl}`));
-  }
+    return links.httpUrl;
+  })();
 
-  runtime.log(info(`OS: ${osSummary.label} · node ${process.versions.node}`));
-  runtime.log(info(formatUpdateOneLiner(update)));
-
-  const gatewayLine = (() => {
+  const gatewayValue = (() => {
     const target = remoteUrlMissing
-      ? "(missing gateway.remote.url)"
-      : gatewayConnection.url;
+      ? `fallback ${gatewayConnection.url}`
+      : `${gatewayConnection.url}${gatewayConnection.urlSource ? ` (${gatewayConnection.urlSource})` : ""}`;
     const reach = remoteUrlMissing
-      ? "misconfigured (missing gateway.remote.url)"
+      ? warn("misconfigured (remote.url missing)")
       : gatewayReachable
-        ? `reachable (${formatDuration(gatewayProbe?.connectLatencyMs)})`
-        : gatewayProbe?.error
-          ? `unreachable (${gatewayProbe.error})`
-          : "unreachable";
+        ? ok(`reachable ${formatDuration(gatewayProbe?.connectLatencyMs)}`)
+        : warn(
+            gatewayProbe?.error
+              ? `unreachable (${gatewayProbe.error})`
+              : "unreachable",
+          );
+    const auth =
+      gatewayReachable && !remoteUrlMissing
+        ? ` · auth ${formatGatewayAuthUsed(resolveGatewayProbeAuth(cfg))}`
+        : "";
     const self =
       gatewaySelf?.host || gatewaySelf?.version || gatewaySelf?.platform
         ? [
@@ -717,11 +778,10 @@ export async function statusCommand(
             .join(" ")
         : null;
     const suffix = self ? ` · ${self}` : "";
-    return `Gateway: ${gatewayMode} · ${target} · ${reach}${suffix}`;
+    return `${gatewayMode} · ${target} · ${reach}${auth}${suffix}`;
   })();
-  runtime.log(info(gatewayLine));
 
-  const agentLine = (() => {
+  const agentsValue = (() => {
     const pending =
       agentStatus.bootstrapPendingCount > 0
         ? `${agentStatus.bootstrapPendingCount} bootstrapping`
@@ -730,300 +790,251 @@ export async function statusCommand(
     const defActive =
       def?.lastActiveAgeMs != null ? formatAge(def.lastActiveAgeMs) : "unknown";
     const defSuffix = def ? ` · default ${def.id} active ${defActive}` : "";
-    return `Agents: ${agentStatus.agents.length} · ${pending} · sessions ${agentStatus.totalSessions}${defSuffix}`;
+    return `${agentStatus.agents.length} · ${pending} · sessions ${agentStatus.totalSessions}${defSuffix}`;
   })();
-  runtime.log(info(agentLine));
 
-  runtime.log(
-    `Web session: ${summary.web.linked ? "linked" : "not linked"}${summary.web.linked ? ` (last refreshed ${formatAge(summary.web.authAgeMs)})` : ""}`,
-  );
-  if (summary.web.linked) {
-    const account = resolveWhatsAppAccount({ cfg });
-    logWebSelfId(account.authDir, runtime, true);
-  }
-  runtime.log("");
-  runtime.log(info("System:"));
-  for (const line of summary.providerSummary) {
-    runtime.log(`  ${line}`);
-  }
-  const daemonLine = await getDaemonShortLine();
-  if (daemonLine) {
-    runtime.log(info(daemonLine));
-  }
+  const daemon = await getDaemonStatusSummary();
+  const daemonValue = (() => {
+    if (daemon.installed === false) return `${daemon.label} not installed`;
+    const installedPrefix = daemon.installed === true ? "installed · " : "";
+    return `${daemon.label} ${installedPrefix}${daemon.loadedText}${daemon.runtimeShort ? ` · ${daemon.runtimeShort}` : ""}`;
+  })();
 
-  if (opts.all) {
-    runtime.log("");
-    runtime.log(theme.heading("Diagnosis (read-only):"));
-
-    const snap = await readConfigFileSnapshot().catch(() => null);
-    if (snap) {
-      runtime.log(
-        formatCheckLine({
-          ok: Boolean(snap.exists && snap.valid),
-          warn: Boolean(snap.exists && !snap.valid),
-          label: `Config: ${snap.path ?? "(unknown)"}`,
-          detail: snap.exists
-            ? snap.valid
-              ? "valid"
-              : `invalid (${snap.issues.length} issues)`
-            : "missing",
-        }),
-      );
-      const issues = [...(snap.legacyIssues ?? []), ...(snap.issues ?? [])];
-      const uniqueIssues = issues.filter(
-        (issue, index) =>
-          issues.findIndex(
-            (x) => x.path === issue.path && x.message === issue.message,
-          ) === index,
-      );
-      for (const issue of uniqueIssues.slice(0, 12)) {
-        runtime.log(`  - ${issue.path}: ${issue.message}`);
-      }
-      if (uniqueIssues.length > 12) {
-        runtime.log(theme.muted(`  … +${uniqueIssues.length - 12} more`));
-      }
-    } else {
-      runtime.log(
-        formatCheckLine({
-          ok: false,
-          label: "Config: unknown",
-          detail: "read failed",
-        }),
-      );
-    }
-
-    const sentinel = await readRestartSentinel().catch(() => null);
-    if (sentinel?.payload) {
-      runtime.log(
-        formatCheckLine({
-          ok: true,
-          label: "Restart sentinel",
-          detail: `${summarizeRestartSentinel(sentinel.payload)} · ${formatAge(Date.now() - sentinel.payload.ts)}`,
-          warn: true,
-        }),
-      );
-    } else {
-      runtime.log(
-        formatCheckLine({
-          ok: true,
-          label: "Restart sentinel",
-          detail: "none",
-        }),
-      );
-    }
-
-    const lastErr = await readLastGatewayErrorLine(process.env).catch(
-      () => null,
-    );
-    if (lastErr) {
-      runtime.log(
-        formatCheckLine({
-          ok: true,
-          warn: true,
-          label: "Gateway last log line",
-          detail: lastErr,
-        }),
-      );
-    } else {
-      runtime.log(
-        formatCheckLine({
-          ok: true,
-          label: "Gateway last log line",
-          detail: "none",
-        }),
-      );
-    }
-
-    const port = resolveGatewayPort(cfg);
-    const portUsage = await inspectPortUsage(port).catch(() => null);
-    if (portUsage) {
-      const ok = portUsage.listeners.length === 0;
-      runtime.log(
-        formatCheckLine({
-          ok,
-          warn: !ok,
-          label: `Port ${port}`,
-          detail: ok ? "free" : "in use",
-        }),
-      );
-      if (!ok) {
-        for (const line of formatPortDiagnostics(portUsage)) {
-          runtime.log(`  ${line}`);
-        }
-      }
-    }
-
-    const defaultWorkspace =
-      agentStatus.agents.find((a) => a.id === agentStatus.defaultId)
-        ?.workspaceDir ??
-      agentStatus.agents[0]?.workspaceDir ??
-      null;
-    const skillStatus =
-      defaultWorkspace != null
-        ? (() => {
-            try {
-              return buildWorkspaceSkillStatus(defaultWorkspace, {
-                config: cfg,
-              });
-            } catch {
-              return null;
-            }
-          })()
-        : null;
-    if (skillStatus) {
-      const eligible = skillStatus.skills.filter((s) => s.eligible).length;
-      const missing = skillStatus.skills.filter(
-        (s) => s.eligible && Object.values(s.missing).some((arr) => arr.length),
-      ).length;
-      runtime.log(
-        formatCheckLine({
-          ok: missing === 0,
-          warn: missing > 0,
-          label: "Skills",
-          detail: `${eligible} eligible · ${missing} missing requirements · ${skillStatus.workspaceDir}`,
-        }),
-      );
-    }
-
-    runtime.log("");
-    runtime.log(theme.heading("Agents:"));
-    for (const agent of agentStatus.agents) {
-      const name = agent.name ? ` (${agent.name})` : "";
-      const bootstrap =
-        agent.bootstrapPending === true
-          ? theme.warn("BOOTSTRAP.md pending")
-          : agent.bootstrapPending === false
-            ? theme.success("bootstrapped")
-            : theme.muted("bootstrap unknown");
-      const active =
-        agent.lastActiveAgeMs != null
-          ? formatAge(agent.lastActiveAgeMs)
-          : "unknown";
-      runtime.log(
-        `- ${theme.info(agent.id)}${name} · ${bootstrap} · sessions ${agent.sessionsCount} · active ${active}`,
-      );
-      if (agent.workspaceDir)
-        runtime.log(theme.muted(`  workspace: ${agent.workspaceDir}`));
-      runtime.log(theme.muted(`  sessions: ${agent.sessionsPath}`));
-    }
-
-    if (gatewayReachable) {
-      const providersStatus = await callGateway<Record<string, unknown>>({
-        method: "providers.status",
-        params: { probe: false, timeoutMs: opts.timeoutMs ?? 10_000 },
-        timeoutMs: Math.min(8000, opts.timeoutMs ?? 10_000),
-      }).catch(() => null);
-      if (providersStatus) {
-        const issues = collectProvidersStatusIssues(providersStatus);
-        runtime.log(
-          formatCheckLine({
-            ok: issues.length === 0,
-            warn: issues.length > 0,
-            label: "Provider config/runtime issues",
-            detail: issues.length ? String(issues.length) : "none",
-          }),
-        );
-        for (const issue of issues.slice(0, 8)) {
-          runtime.log(
-            `  - ${issue.provider}[${issue.accountId}] ${issue.kind}: ${issue.message}`,
-          );
-          if (issue.fix) runtime.log(theme.muted(`    fix: ${issue.fix}`));
-        }
-        if (issues.length > 8) {
-          runtime.log(theme.muted(`  … +${issues.length - 8} more`));
-        }
-      } else {
-        runtime.log(
-          formatCheckLine({
-            ok: false,
-            warn: true,
-            label: "Provider config/runtime issues",
-            detail: "skipped (gateway query failed)",
-          }),
-        );
-      }
-    } else {
-      runtime.log(
-        formatCheckLine({
-          ok: false,
-          warn: true,
-          label: "Provider config/runtime issues",
-          detail: "skipped (gateway unreachable)",
-        }),
-      );
-    }
-
-    runtime.log("");
-    runtime.log(
-      theme.muted(
-        "Tip: This output is safe to paste for debugging (no tokens).",
-      ),
-    );
-  }
-
-  runtime.log("");
-  if (health) {
-    runtime.log(info("Gateway health: reachable"));
-
-    const tgLine = health.telegram.configured
-      ? health.telegram.probe?.ok
-        ? info(
-            `Telegram: ok${health.telegram.probe.bot?.username ? ` (@${health.telegram.probe.bot.username})` : ""} (${health.telegram.probe.elapsedMs}ms)` +
-              (health.telegram.probe.webhook?.url
-                ? ` - webhook ${health.telegram.probe.webhook.url}`
-                : ""),
-          )
-        : `Telegram: failed (${health.telegram.probe?.status ?? "unknown"})${health.telegram.probe?.error ? ` - ${health.telegram.probe.error}` : ""}`
-      : info("Telegram: not configured");
-    runtime.log(tgLine);
-
-    const discordLine = health.discord.configured
-      ? health.discord.probe?.ok
-        ? info(
-            `Discord: ok${health.discord.probe.bot?.username ? ` (@${health.discord.probe.bot.username})` : ""} (${health.discord.probe.elapsedMs}ms)`,
-          )
-        : `Discord: failed (${health.discord.probe?.status ?? "unknown"})${health.discord.probe?.error ? ` - ${health.discord.probe.error}` : ""}`
-      : info("Discord: not configured");
-    runtime.log(discordLine);
-  } else {
-    runtime.log(info("Provider probes: skipped (use --deep)"));
-  }
-  runtime.log("");
-  if (summary.queuedSystemEvents.length > 0) {
-    const preview = summary.queuedSystemEvents.slice(0, 3).join(" | ");
-    runtime.log(
-      info(
-        `Queued system events (${summary.queuedSystemEvents.length}): ${preview}`,
-      ),
-    );
-  }
-  runtime.log(info(`Heartbeat: ${summary.heartbeatSeconds}s`));
-  runtime.log(info(`Session store: ${summary.sessions.path}`));
   const defaults = summary.sessions.defaults;
   const defaultCtx = defaults.contextTokens
     ? ` (${formatKTokens(defaults.contextTokens)} ctx)`
     : "";
-  runtime.log(
-    info(`Default model: ${defaults.model ?? "unknown"}${defaultCtx}`),
-  );
-  runtime.log(info(`Active sessions: ${summary.sessions.count}`));
-  if (summary.sessions.recent.length > 0) {
-    runtime.log("Recent sessions:");
-    for (const r of summary.sessions.recent) {
-      runtime.log(
-        `- ${r.key} [${r.kind}] | ${r.updatedAt ? formatAge(r.age) : "no activity"} | model ${r.model ?? "unknown"} | ${formatContextUsage(r.totalTokens, r.contextTokens, r.remainingTokens, r.percentUsed)}${r.flags.length ? ` | flags: ${r.flags.join(", ")}` : ""}`,
-      );
-    }
-  } else {
-    runtime.log("No session activity yet.");
-  }
+  const eventsValue =
+    summary.queuedSystemEvents.length > 0
+      ? `${summary.queuedSystemEvents.length} queued`
+      : "none";
+
+  const probesValue = health ? ok("enabled") : muted("skipped (use --deep)");
+
+  const overviewRows = [
+    { Item: "Dashboard", Value: dashboard },
+    { Item: "OS", Value: `${osSummary.label} · node ${process.versions.node}` },
+    {
+      Item: "Tailscale",
+      Value:
+        tailscaleMode === "off"
+          ? muted("off")
+          : tailscaleDns && tailscaleHttpsUrl
+            ? `${tailscaleMode} · ${tailscaleDns} · ${tailscaleHttpsUrl}`
+            : warn(`${tailscaleMode} · magicdns unknown`),
+    },
+    {
+      Item: "Update",
+      Value: formatUpdateOneLiner(update).replace(/^Update:\s*/i, ""),
+    },
+    { Item: "Gateway", Value: gatewayValue },
+    { Item: "Daemon", Value: daemonValue },
+    { Item: "Agents", Value: agentsValue },
+    { Item: "Probes", Value: probesValue },
+    { Item: "Events", Value: eventsValue },
+    { Item: "Heartbeat", Value: `${summary.heartbeatSeconds}s` },
+    {
+      Item: "Sessions",
+      Value: `${summary.sessions.count} active · default ${defaults.model ?? "unknown"}${defaultCtx} · store ${summary.sessions.path}`,
+    },
+  ];
+
+  runtime.log(theme.heading("Clawdbot status"));
   runtime.log("");
+  runtime.log(theme.heading("Overview"));
+  runtime.log(
+    renderTable({
+      width: tableWidth,
+      columns: [
+        { key: "Item", header: "Item", minWidth: 12 },
+        { key: "Value", header: "Value", flex: true, minWidth: 32 },
+      ],
+      rows: overviewRows,
+    }).trimEnd(),
+  );
+
+  runtime.log("");
+  runtime.log(theme.heading("Providers"));
+  const providerIssuesByProvider = (() => {
+    const map = new Map<string, typeof providerIssues>();
+    for (const issue of providerIssues) {
+      const key = issue.provider;
+      const list = map.get(key);
+      if (list) list.push(issue);
+      else map.set(key, [issue]);
+    }
+    return map;
+  })();
+  const providerKeyForLabel = (label: string) => {
+    switch (label) {
+      case "WhatsApp":
+        return "whatsapp";
+      case "Telegram":
+        return "telegram";
+      case "Discord":
+        return "discord";
+      case "Slack":
+        return "slack";
+      case "Signal":
+        return "signal";
+      case "iMessage":
+        return "imessage";
+      default:
+        return label.toLowerCase();
+    }
+  };
+  runtime.log(
+    renderTable({
+      width: tableWidth,
+      columns: [
+        { key: "Provider", header: "Provider", minWidth: 10 },
+        { key: "Enabled", header: "Enabled", minWidth: 7 },
+        { key: "State", header: "State", minWidth: 8 },
+        { key: "Detail", header: "Detail", flex: true, minWidth: 24 },
+      ],
+      rows: providers.rows.map((row) => {
+        const providerKey = providerKeyForLabel(row.provider);
+        const issues = providerIssuesByProvider.get(providerKey) ?? [];
+        const effectiveState =
+          row.state === "off" ? "off" : issues.length > 0 ? "warn" : row.state;
+        const issueSuffix =
+          issues.length > 0
+            ? ` · ${warn(`gateway: ${shortenText(issues[0]?.message ?? "issue", 84)}`)}`
+            : "";
+        return {
+          Provider: row.provider,
+          Enabled: row.enabled ? ok("ON") : muted("OFF"),
+          State:
+            effectiveState === "ok"
+              ? ok("OK")
+              : effectiveState === "warn"
+                ? warn("WARN")
+                : effectiveState === "off"
+                  ? muted("OFF")
+                  : theme.accentDim("SETUP"),
+          Detail: `${row.detail}${issueSuffix}`,
+        };
+      }),
+    }).trimEnd(),
+  );
+
+  runtime.log("");
+  runtime.log(theme.heading("Sessions"));
+  runtime.log(
+    renderTable({
+      width: tableWidth,
+      columns: [
+        { key: "Key", header: "Key", minWidth: 20, flex: true },
+        { key: "Kind", header: "Kind", minWidth: 6 },
+        { key: "Age", header: "Age", minWidth: 9 },
+        { key: "Model", header: "Model", minWidth: 14 },
+        { key: "Tokens", header: "Tokens", minWidth: 16 },
+      ],
+      rows:
+        summary.sessions.recent.length > 0
+          ? summary.sessions.recent.map((sess) => ({
+              Key: shortenText(sess.key, 32),
+              Kind: sess.kind,
+              Age: sess.updatedAt ? formatAge(sess.age) : "no activity",
+              Model: sess.model ?? "unknown",
+              Tokens: formatTokensCompact(sess),
+            }))
+          : [
+              {
+                Key: muted("no sessions yet"),
+                Kind: "",
+                Age: "",
+                Model: "",
+                Tokens: "",
+              },
+            ],
+    }).trimEnd(),
+  );
+
+  if (summary.queuedSystemEvents.length > 0) {
+    runtime.log("");
+    runtime.log(theme.heading("System events"));
+    runtime.log(
+      renderTable({
+        width: tableWidth,
+        columns: [{ key: "Event", header: "Event", flex: true, minWidth: 24 }],
+        rows: summary.queuedSystemEvents.slice(0, 5).map((event) => ({
+          Event: event,
+        })),
+      }).trimEnd(),
+    );
+    if (summary.queuedSystemEvents.length > 5) {
+      runtime.log(muted(`… +${summary.queuedSystemEvents.length - 5} more`));
+    }
+  }
+
+  if (health) {
+    runtime.log("");
+    runtime.log(theme.heading("Health"));
+    const rows: Array<Record<string, string>> = [];
+    rows.push({
+      Provider: "Gateway",
+      Status: ok("reachable"),
+      Detail: `${health.durationMs}ms`,
+    });
+    rows.push({
+      Provider: "Telegram",
+      Status: health.telegram.configured
+        ? health.telegram.probe?.ok
+          ? ok("OK")
+          : warn("WARN")
+        : muted("OFF"),
+      Detail: health.telegram.configured
+        ? health.telegram.probe?.ok
+          ? `@${health.telegram.probe.bot?.username ?? "unknown"} · ${health.telegram.probe.elapsedMs}ms`
+          : (health.telegram.probe?.error ?? "probe failed")
+        : "not configured",
+    });
+    rows.push({
+      Provider: "Discord",
+      Status: health.discord.configured
+        ? health.discord.probe?.ok
+          ? ok("OK")
+          : warn("WARN")
+        : muted("OFF"),
+      Detail: health.discord.configured
+        ? health.discord.probe?.ok
+          ? `@${health.discord.probe.bot?.username ?? "unknown"} · ${health.discord.probe.elapsedMs}ms`
+          : (health.discord.probe?.error ?? "probe failed")
+        : "not configured",
+    });
+
+    runtime.log(
+      renderTable({
+        width: tableWidth,
+        columns: [
+          { key: "Provider", header: "Provider", minWidth: 10 },
+          { key: "Status", header: "Status", minWidth: 8 },
+          { key: "Detail", header: "Detail", flex: true, minWidth: 28 },
+        ],
+        rows,
+      }).trimEnd(),
+    );
+  }
 
   if (usage) {
+    runtime.log("");
+    runtime.log(theme.heading("Usage"));
     for (const line of formatUsageReportLines(usage)) {
       runtime.log(line);
     }
   }
+
+  runtime.log("");
   runtime.log("FAQ: https://docs.clawd.bot/faq");
   runtime.log("Troubleshooting: https://docs.clawd.bot/troubleshooting");
+  runtime.log("");
+  runtime.log("Next steps:");
+  runtime.log("  Need to share?      clawdbot status --all");
+  runtime.log("  Need to debug live? clawdbot logs --follow");
+  if (gatewayReachable) {
+    runtime.log("  Need to test providers? clawdbot status --deep");
+  } else {
+    runtime.log("  Fix reachability first: clawdbot gateway status");
+  }
 }

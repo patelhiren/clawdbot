@@ -1,10 +1,8 @@
 import path from "node:path";
 
-import { note as clackNote } from "@clack/prompts";
-
 import type { ClawdbotConfig } from "../config/config.js";
 import { resolveGatewayPort, resolveIsNixMode } from "../config/paths.js";
-import { GATEWAY_LAUNCH_AGENT_LABEL } from "../daemon/constants.js";
+import { resolveGatewayLaunchAgentLabel } from "../daemon/constants.js";
 import {
   findExtraGatewayServices,
   renderGatewayServiceCleanupHints,
@@ -26,16 +24,13 @@ import {
 } from "../daemon/service-audit.js";
 import { buildServiceEnvironment } from "../daemon/service-env.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { stylePromptTitle } from "../terminal/prompt-style.js";
+import { note } from "../terminal/note.js";
 import {
   DEFAULT_GATEWAY_DAEMON_RUNTIME,
   GATEWAY_DAEMON_RUNTIME_OPTIONS,
   type GatewayDaemonRuntime,
 } from "./daemon-runtime.js";
 import type { DoctorOptions, DoctorPrompter } from "./doctor-prompter.js";
-
-const note = (message: string, title?: string) =>
-  clackNote(message, stylePromptTitle(title));
 
 function detectGatewayRuntime(
   programArguments: string[] | undefined,
@@ -103,7 +98,9 @@ export async function maybeMigrateLegacyGatewayService(
   }
 
   const service = resolveGatewayService();
-  const loaded = await service.isLoaded({ env: process.env });
+  const loaded = await service.isLoaded({
+    profile: process.env.CLAWDBOT_PROFILE,
+  });
   if (loaded) {
     note(`Clawdbot ${service.label} already ${service.loadedText}.`, "Gateway");
     return;
@@ -143,7 +140,9 @@ export async function maybeMigrateLegacyGatewayService(
     port,
     token: cfg.gateway?.auth?.token ?? process.env.CLAWDBOT_GATEWAY_TOKEN,
     launchdLabel:
-      process.platform === "darwin" ? GATEWAY_LAUNCH_AGENT_LABEL : undefined,
+      process.platform === "darwin"
+        ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
+        : undefined,
   });
   await service.install({
     env: process.env,
@@ -263,7 +262,9 @@ export async function maybeRepairGatewayServiceConfig(
     port,
     token: cfg.gateway?.auth?.token ?? process.env.CLAWDBOT_GATEWAY_TOKEN,
     launchdLabel:
-      process.platform === "darwin" ? GATEWAY_LAUNCH_AGENT_LABEL : undefined,
+      process.platform === "darwin"
+        ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
+        : undefined,
   });
 
   try {

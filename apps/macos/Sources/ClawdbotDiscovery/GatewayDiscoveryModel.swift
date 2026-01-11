@@ -112,6 +112,19 @@ public final class GatewayDiscoveryModel {
         self.scheduleWideAreaFallback()
     }
 
+    public func refreshWideAreaFallbackNow(timeoutSeconds: TimeInterval = 5.0) {
+        let domain = ClawdbotBonjour.wideAreaBridgeServiceDomain
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let beacons = WideAreaGatewayDiscovery.discover(timeoutSeconds: timeoutSeconds)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.wideAreaFallbackGateways = self.mapWideAreaBeacons(beacons, domain: domain)
+                self.recomputeGateways()
+            }
+        }
+    }
+
     public func stop() {
         for browser in self.browsers.values {
             browser.cancel()
@@ -130,27 +143,45 @@ public final class GatewayDiscoveryModel {
         self.statusText = "Stopped"
     }
 
+    private func mapWideAreaBeacons(_ beacons: [WideAreaGatewayBeacon], domain: String) -> [DiscoveredGateway] {
+        beacons.map { beacon in
+            let stableID = "wide-area|\(domain)|\(beacon.instanceName)"
+            let isLocal = Self.isLocalGateway(
+                lanHost: beacon.lanHost,
+                tailnetDns: beacon.tailnetDns,
+                displayName: beacon.displayName,
+                serviceName: beacon.instanceName,
+                local: self.localIdentity)
+            return DiscoveredGateway(
+                displayName: beacon.displayName,
+                lanHost: beacon.lanHost,
+                tailnetDns: beacon.tailnetDns,
+                sshPort: beacon.sshPort ?? 22,
+                gatewayPort: beacon.gatewayPort,
+                cliPath: beacon.cliPath,
+                stableID: stableID,
+                debugID: "\(beacon.instanceName)@\(beacon.host):\(beacon.port)",
+                isLocal: isLocal)
+        }
+    }
+
     private func recomputeGateways() {
-        var next = self.gatewaysByDomain.values
-            .flatMap(\.self)
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        if self.gatewaysByDomain[ClawdbotBonjour.wideAreaBridgeServiceDomain]?.isEmpty ?? true,
-           !self.wideAreaFallbackGateways.isEmpty
-        {
-            next.append(contentsOf: self.wideAreaFallbackGateways)
+        let primary = self.sortedDeduped(gateways: self.gatewaysByDomain.values.flatMap(\.self))
+        let primaryFiltered = self.filterLocalGateways ? primary.filter { !$0.isLocal } : primary
+        if !primaryFiltered.isEmpty {
+            self.gateways = primaryFiltered
+            return
         }
-        var seen = Set<String>()
-        let deduped = next.filter { gateway in
-            if seen.contains(gateway.stableID) { return false }
-            seen.insert(gateway.stableID)
-            return true
+
+        // Bonjour can return only "local" results for the wide-area domain (or no results at all),
+        // which makes onboarding look empty even though Tailscale DNS-SD can already see bridges.
+        guard !self.wideAreaFallbackGateways.isEmpty else {
+            self.gateways = primaryFiltered
+            return
         }
-        let sorted = deduped.sorted {
-            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-        }
-        self.gateways = self.filterLocalGateways
-            ? sorted.filter { !$0.isLocal }
-            : sorted
+
+        let combined = self.sortedDeduped(gateways: primary + self.wideAreaFallbackGateways)
+        self.gateways = self.filterLocalGateways ? combined.filter { !$0.isLocal } : combined
     }
 
     private func updateGateways(for domain: String) {
@@ -205,7 +236,7 @@ public final class GatewayDiscoveryModel {
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
 
         if domain == ClawdbotBonjour.wideAreaBridgeServiceDomain,
-           !(self.gatewaysByDomain[domain]?.isEmpty ?? true)
+           self.hasUsableWideAreaResults
         {
             self.wideAreaFallbackGateways = []
         }
@@ -213,42 +244,64 @@ public final class GatewayDiscoveryModel {
 
     private func scheduleWideAreaFallback() {
         let domain = ClawdbotBonjour.wideAreaBridgeServiceDomain
+        if Self.isRunningTests { return }
         guard self.wideAreaFallbackTask == nil else { return }
         self.wideAreaFallbackTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
-            if Task.isCancelled { return }
-            let hasResults = await MainActor.run {
-                !(self.gatewaysByDomain[domain]?.isEmpty ?? true)
-            }
-            if hasResults { return }
-
-            let beacons = WideAreaGatewayDiscovery.discover(timeoutSeconds: 3.0)
-            if beacons.isEmpty { return }
-
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.wideAreaFallbackGateways = beacons.map { beacon in
-                    let stableID = "wide-area|\(domain)|\(beacon.instanceName)"
-                    let isLocal = Self.isLocalGateway(
-                        lanHost: beacon.lanHost,
-                        tailnetDns: beacon.tailnetDns,
-                        displayName: beacon.displayName,
-                        serviceName: beacon.instanceName,
-                        local: self.localIdentity)
-                    return DiscoveredGateway(
-                        displayName: beacon.displayName,
-                        lanHost: beacon.lanHost,
-                        tailnetDns: beacon.tailnetDns,
-                        sshPort: beacon.sshPort ?? 22,
-                        gatewayPort: beacon.gatewayPort,
-                        cliPath: beacon.cliPath,
-                        stableID: stableID,
-                        debugID: "\(beacon.instanceName)@\(beacon.host):\(beacon.port)",
-                        isLocal: isLocal)
+            var attempt = 0
+            let startedAt = Date()
+            while !Task.isCancelled, Date().timeIntervalSince(startedAt) < 35.0 {
+                let hasResults = await MainActor.run {
+                    self.hasUsableWideAreaResults
                 }
-                self.recomputeGateways()
+                if hasResults { return }
+
+                // Wide-area discovery can be racy (Tailscale not yet up, DNS zone not
+                // published yet). Retry with a short backoff while onboarding is open.
+                let beacons = WideAreaGatewayDiscovery.discover(timeoutSeconds: 2.0)
+                if !beacons.isEmpty {
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        self.wideAreaFallbackGateways = self.mapWideAreaBeacons(beacons, domain: domain)
+                        self.recomputeGateways()
+                    }
+                    return
+                }
+
+                attempt += 1
+                let backoff = min(8.0, 0.6 + (Double(attempt) * 0.7))
+                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
             }
         }
+    }
+
+    private var hasUsableWideAreaResults: Bool {
+        let domain = ClawdbotBonjour.wideAreaBridgeServiceDomain
+        guard let gateways = self.gatewaysByDomain[domain], !gateways.isEmpty else { return false }
+        if !self.filterLocalGateways { return true }
+        return gateways.contains(where: { !$0.isLocal })
+    }
+
+    private func sortedDeduped(gateways: [DiscoveredGateway]) -> [DiscoveredGateway] {
+        var seen = Set<String>()
+        let deduped = gateways.filter { gateway in
+            if seen.contains(gateway.stableID) { return false }
+            seen.insert(gateway.stableID)
+            return true
+        }
+        return deduped.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    private nonisolated static var isRunningTests: Bool {
+        // Keep discovery background work from running forever during SwiftPM test runs.
+        if Bundle.allBundles.contains(where: { $0.bundleURL.pathExtension == "xctest" }) { return true }
+
+        let env = ProcessInfo.processInfo.environment
+        return env["XCTestConfigurationFilePath"] != nil
+            || env["XCTestBundlePath"] != nil
+            || env["XCTestSessionIdentifier"] != nil
     }
 
     private func updateGatewaysForAllDomains() {
@@ -449,10 +502,10 @@ public final class GatewayDiscoveryModel {
         {
             return true
         }
-        if let service = normalizeServiceToken(serviceName) {
-            for token in local.hostTokens where service.contains(token) {
-                return true
-            }
+        if let serviceHost = normalizeServiceHostToken(serviceName),
+           local.hostTokens.contains(serviceHost)
+        {
+            return true
         }
         return false
     }
@@ -542,11 +595,14 @@ public final class GatewayDiscoveryModel {
         return trimmed.lowercased()
     }
 
-    private nonisolated static func normalizeServiceToken(_ raw: String?) -> String? {
+    private nonisolated static func normalizeServiceHostToken(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
-        return trimmed.lowercased()
+        let prettified = Self.prettifyInstanceName(raw)
+        let strippedBridge = prettified.replacingOccurrences(
+            of: #"\s*-?\s*bridge$"#,
+            with: "",
+            options: .regularExpression)
+        return normalizeHostToken(strippedBridge)
     }
 }
 

@@ -68,7 +68,7 @@ import { resolveWhatsAppAccount } from "./accounts.js";
 import { setActiveWebListener } from "./active-listener.js";
 import { monitorWebInbox } from "./inbound.js";
 import { loadWebMedia } from "./media.js";
-import { sendMessageWhatsApp } from "./outbound.js";
+import { sendMessageWhatsApp, sendReactionWhatsApp } from "./outbound.js";
 import {
   computeBackoff,
   newConnectionId,
@@ -178,6 +178,12 @@ type MentionConfig = {
   allowFrom?: Array<string | number>;
 };
 
+type MentionTargets = {
+  normalizedMentions: string[];
+  selfE164: string | null;
+  selfJid: string | null;
+};
+
 function buildMentionConfig(
   cfg: ReturnType<typeof loadConfig>,
   agentId?: string,
@@ -186,25 +192,42 @@ function buildMentionConfig(
   return { mentionRegexes, allowFrom: cfg.whatsapp?.allowFrom };
 }
 
-function isBotMentioned(
+function resolveMentionTargets(
+  msg: WebInboundMsg,
+  authDir?: string,
+): MentionTargets {
+  const jidOptions = authDir ? { authDir } : undefined;
+  const normalizedMentions = msg.mentionedJids?.length
+    ? msg.mentionedJids
+        .map((jid) => jidToE164(jid, jidOptions) ?? jid)
+        .filter(Boolean)
+    : [];
+  const selfE164 =
+    msg.selfE164 ?? (msg.selfJid ? jidToE164(msg.selfJid, jidOptions) : null);
+  const selfJid = msg.selfJid ? msg.selfJid.replace(/:\\d+/, "") : null;
+  return { normalizedMentions, selfE164, selfJid };
+}
+
+function isBotMentionedFromTargets(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  targets: MentionTargets,
 ): boolean {
   const clean = (text: string) =>
     // Remove zero-width and directionality markers WhatsApp injects around display names
     normalizeMentionText(text);
 
-  const isSelfChat = isSelfChatMode(msg.selfE164, mentionCfg.allowFrom);
+  const isSelfChat = isSelfChatMode(targets.selfE164, mentionCfg.allowFrom);
 
   if (msg.mentionedJids?.length && !isSelfChat) {
-    const normalizedMentions = msg.mentionedJids
-      .map((jid) => jidToE164(jid) ?? jid)
-      .filter(Boolean);
-    if (msg.selfE164 && normalizedMentions.includes(msg.selfE164)) return true;
-    if (msg.selfJid && msg.selfE164) {
+    if (
+      targets.selfE164 &&
+      targets.normalizedMentions.includes(targets.selfE164)
+    )
+      return true;
+    if (targets.selfJid && targets.selfE164) {
       // Some mentions use the bare JID; match on E.164 to be safe.
-      const bareSelf = msg.selfJid.replace(/:\\d+/, "");
-      if (normalizedMentions.includes(bareSelf)) return true;
+      if (targets.normalizedMentions.includes(targets.selfJid)) return true;
     }
   } else if (msg.mentionedJids?.length && isSelfChat) {
     // Self-chat mode: ignore WhatsApp @mention JIDs, otherwise @mentioning the owner in group chats triggers the bot.
@@ -213,8 +236,8 @@ function isBotMentioned(
   if (mentionCfg.mentionRegexes.some((re) => re.test(bodyClean))) return true;
 
   // Fallback: detect body containing our own number (with or without +, spacing)
-  if (msg.selfE164) {
-    const selfDigits = msg.selfE164.replace(/\D/g, "");
+  if (targets.selfE164) {
+    const selfDigits = targets.selfE164.replace(/\D/g, "");
     if (selfDigits) {
       const bodyDigits = bodyClean.replace(/[^\d]/g, "");
       if (bodyDigits.includes(selfDigits)) return true;
@@ -230,15 +253,22 @@ function isBotMentioned(
 function debugMention(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  authDir?: string,
 ): { wasMentioned: boolean; details: Record<string, unknown> } {
-  const result = isBotMentioned(msg, mentionCfg);
+  const mentionTargets = resolveMentionTargets(msg, authDir);
+  const result = isBotMentionedFromTargets(msg, mentionCfg, mentionTargets);
   const details = {
     from: msg.from,
     body: msg.body,
     bodyClean: normalizeMentionText(msg.body),
     mentionedJids: msg.mentionedJids ?? null,
+    normalizedMentionedJids: mentionTargets.normalizedMentions.length
+      ? mentionTargets.normalizedMentions
+      : null,
     selfJid: msg.selfJid ?? null,
+    selfJidBare: mentionTargets.selfJid,
     selfE164: msg.selfE164 ?? null,
+    resolvedSelfE164: mentionTargets.selfE164,
   };
   return { wasMentioned: result, details };
 }
@@ -796,6 +826,7 @@ export async function monitorWebProvider(
     ...baseCfg,
     whatsapp: {
       ...baseCfg.whatsapp,
+      ackReaction: account.ackReaction,
       messagePrefix: account.messagePrefix,
       allowFrom: account.allowFrom,
       groupAllowFrom: account.groupAllowFrom,
@@ -1167,6 +1198,64 @@ export async function monitorWebProvider(
         logVerbose(`Skipping auto-reply: detected echo for combined message`);
         recentlySent.delete(combinedEchoKey);
         return false;
+      }
+
+      // Send ack reaction immediately upon message receipt (post-gating)
+      if (msg.id) {
+        const ackConfig = cfg.whatsapp?.ackReaction;
+        const emoji = (ackConfig?.emoji ?? "").trim();
+        const directEnabled = ackConfig?.direct ?? true;
+        const groupMode = ackConfig?.group ?? "mentions";
+        const conversationIdForCheck = msg.conversationId ?? msg.from;
+
+        const shouldSendReaction = () => {
+          if (!emoji) return false;
+
+          if (msg.chatType === "direct") {
+            return directEnabled;
+          }
+
+          if (msg.chatType === "group") {
+            if (groupMode === "never") return false;
+            if (groupMode === "always") return true;
+            if (groupMode === "mentions") {
+              const activation = resolveGroupActivationFor({
+                agentId: route.agentId,
+                sessionKey: route.sessionKey,
+                conversationId: conversationIdForCheck,
+              });
+              if (activation === "always") return true;
+              return msg.wasMentioned === true;
+            }
+          }
+
+          return false;
+        };
+
+        if (shouldSendReaction()) {
+          replyLogger.info(
+            { chatId: msg.chatId, messageId: msg.id, emoji },
+            "sending ack reaction",
+          );
+          sendReactionWhatsApp(msg.chatId, msg.id, emoji, {
+            verbose,
+            fromMe: false,
+            participant: msg.senderJid,
+            accountId: route.accountId,
+          }).catch((err) => {
+            replyLogger.warn(
+              {
+                error: formatError(err),
+                chatId: msg.chatId,
+                messageId: msg.id,
+              },
+              "failed to send ack reaction",
+            );
+            logVerbose(
+              `WhatsApp ack reaction failed for chat ${msg.chatId}: ${formatError(err)}`,
+            );
+          });
+        }
       }
 
       const correlationId = msg.id ?? newConnectionId();
@@ -1584,7 +1673,11 @@ export async function monitorWebProvider(
             groupHistories.set(groupHistoryKey, history);
           }
 
-          const mentionDebug = debugMention(msg, mentionConfig);
+          const mentionDebug = debugMention(
+            msg,
+            mentionConfig,
+            account.authDir,
+          );
           replyLogger.debug(
             {
               conversationId,

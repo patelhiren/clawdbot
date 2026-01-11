@@ -602,7 +602,7 @@ export async function handleCommands(params: {
       );
       return { shouldContinue: false };
     }
-    return { shouldContinue: false, reply: { text: buildHelpMessage() } };
+    return { shouldContinue: false, reply: { text: buildHelpMessage(cfg) } };
   }
 
   const commandsRequested = command.commandBodyNormalized === "/commands";
@@ -613,7 +613,10 @@ export async function handleCommands(params: {
       );
       return { shouldContinue: false };
     }
-    return { shouldContinue: false, reply: { text: buildCommandsMessage() } };
+    return {
+      shouldContinue: false,
+      reply: { text: buildCommandsMessage(cfg) },
+    };
   }
 
   const statusRequested =
@@ -640,6 +643,30 @@ export async function handleCommands(params: {
     return { shouldContinue: false, reply };
   }
 
+  const whoamiRequested = command.commandBodyNormalized === "/whoami";
+  if (allowTextCommands && whoamiRequested) {
+    const senderId = ctx.SenderId ?? "";
+    const senderUsername = ctx.SenderUsername ?? "";
+    const lines = ["🧭 Identity", `Provider: ${command.provider}`];
+    if (senderId) lines.push(`User id: ${senderId}`);
+    if (senderUsername) {
+      const handle = senderUsername.startsWith("@")
+        ? senderUsername
+        : `@${senderUsername}`;
+      lines.push(`Username: ${handle}`);
+    }
+    if (ctx.ChatType === "group" && ctx.From) {
+      lines.push(`Chat: ${ctx.From}`);
+    }
+    if (ctx.MessageThreadId != null) {
+      lines.push(`Thread: ${ctx.MessageThreadId}`);
+    }
+    if (senderId) {
+      lines.push(`AllowFrom: ${senderId}`);
+    }
+    return { shouldContinue: false, reply: { text: lines.join("\n") } };
+  }
+
   const configCommand = allowTextCommands
     ? parseConfigCommand(command.commandBodyNormalized)
     : null;
@@ -649,6 +676,14 @@ export async function handleCommands(params: {
         `Ignoring /config from unauthorized sender: ${command.senderE164 || "<unknown>"}`,
       );
       return { shouldContinue: false };
+    }
+    if (cfg.commands?.config !== true) {
+      return {
+        shouldContinue: false,
+        reply: {
+          text: "⚠️ /config is disabled. Set commands.config=true to enable.",
+        },
+      };
     }
     if (configCommand.action === "error") {
       return {
@@ -773,6 +808,14 @@ export async function handleCommands(params: {
         `Ignoring /debug from unauthorized sender: ${command.senderE164 || "<unknown>"}`,
       );
       return { shouldContinue: false };
+    }
+    if (cfg.commands?.debug !== true) {
+      return {
+        shouldContinue: false,
+        reply: {
+          text: "⚠️ /debug is disabled. Set commands.debug=true to enable.",
+        },
+      };
     }
     if (debugCommand.action === "error") {
       return {

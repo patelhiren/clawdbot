@@ -137,6 +137,12 @@ export const CHAT_COMMANDS: ChatCommandDefinition[] = (() => {
       textAlias: "/status",
     }),
     defineChatCommand({
+      key: "whoami",
+      nativeName: "whoami",
+      description: "Show your sender id.",
+      textAlias: "/whoami",
+    }),
+    defineChatCommand({
       key: "config",
       nativeName: "config",
       description: "Show or set config values.",
@@ -247,6 +253,7 @@ export const CHAT_COMMANDS: ChatCommandDefinition[] = (() => {
   ];
 
   registerAlias(commands, "status", "/usage");
+  registerAlias(commands, "whoami", "/id");
   registerAlias(commands, "think", "/thinking", "/t");
   registerAlias(commands, "verbose", "/v");
   registerAlias(commands, "reasoning", "/reason");
@@ -290,6 +297,21 @@ export function listChatCommands(): ChatCommandDefinition[] {
   return [...CHAT_COMMANDS];
 }
 
+export function isCommandEnabled(
+  cfg: ClawdbotConfig,
+  commandKey: string,
+): boolean {
+  if (commandKey === "config") return cfg.commands?.config === true;
+  if (commandKey === "debug") return cfg.commands?.debug === true;
+  return true;
+}
+
+export function listChatCommandsForConfig(
+  cfg: ClawdbotConfig,
+): ChatCommandDefinition[] {
+  return CHAT_COMMANDS.filter((command) => isCommandEnabled(cfg, command.key));
+}
+
 export function listNativeCommandSpecs(): NativeCommandSpec[] {
   return CHAT_COMMANDS.filter(
     (command) => command.scope !== "text" && command.nativeName,
@@ -298,6 +320,18 @@ export function listNativeCommandSpecs(): NativeCommandSpec[] {
     description: command.description,
     acceptsArgs: Boolean(command.acceptsArgs),
   }));
+}
+
+export function listNativeCommandSpecsForConfig(
+  cfg: ClawdbotConfig,
+): NativeCommandSpec[] {
+  return listChatCommandsForConfig(cfg)
+    .filter((command) => command.scope !== "text" && command.nativeName)
+    .map((command) => ({
+      name: command.nativeName ?? command.key,
+      description: command.description,
+      acceptsArgs: Boolean(command.acceptsArgs),
+    }));
 }
 
 export function findCommandByNativeName(

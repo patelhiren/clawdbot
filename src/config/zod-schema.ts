@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { parseDurationMs } from "../cli/parse-duration.js";
+import { isSafeExecutableValue } from "../infra/exec-safety.js";
 
 const ModelApiSchema = z.union([
   z.literal("openai-completions"),
@@ -123,6 +124,40 @@ const HumanDelaySchema = z.object({
   maxMs: z.number().int().nonnegative().optional(),
 });
 
+const CliBackendSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  output: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  resumeOutput: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  input: z.union([z.literal("arg"), z.literal("stdin")]).optional(),
+  maxPromptArgChars: z.number().int().positive().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  clearEnv: z.array(z.string()).optional(),
+  modelArg: z.string().optional(),
+  modelAliases: z.record(z.string(), z.string()).optional(),
+  sessionArg: z.string().optional(),
+  sessionArgs: z.array(z.string()).optional(),
+  resumeArgs: z.array(z.string()).optional(),
+  sessionMode: z
+    .union([z.literal("always"), z.literal("existing"), z.literal("none")])
+    .optional(),
+  sessionIdFields: z.array(z.string()).optional(),
+  systemPromptArg: z.string().optional(),
+  systemPromptMode: z
+    .union([z.literal("append"), z.literal("replace")])
+    .optional(),
+  systemPromptWhen: z
+    .union([z.literal("first"), z.literal("always"), z.literal("never")])
+    .optional(),
+  imageArg: z.string().optional(),
+  imageMode: z.union([z.literal("repeat"), z.literal("list")]).optional(),
+  serialize: z.boolean().optional(),
+});
+
 const normalizeAllowFrom = (values?: Array<string | number>): string[] =>
   (values ?? []).map((v) => String(v).trim()).filter(Boolean);
 
@@ -179,7 +214,16 @@ const QueueSchema = z
 
 const TranscribeAudioSchema = z
   .object({
-    command: z.array(z.string()),
+    command: z.array(z.string()).superRefine((value, ctx) => {
+      const executable = value[0];
+      if (!isSafeExecutableValue(executable)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [0],
+          message: "expected safe executable name or path",
+        });
+      }
+    }),
     timeoutSeconds: z.number().int().positive().optional(),
   })
   .optional();
@@ -187,6 +231,17 @@ const TranscribeAudioSchema = z
 const HexColorSchema = z
   .string()
   .regex(/^#?[0-9a-fA-F]{6}$/, "expected hex color (RRGGBB)");
+
+const ExecutableTokenSchema = z
+  .string()
+  .refine(isSafeExecutableValue, "expected safe executable name or path");
+
+const ToolsAudioTranscriptionSchema = z
+  .object({
+    args: z.array(z.string()).optional(),
+    timeoutSeconds: z.number().int().positive().optional(),
+  })
+  .optional();
 
 const TelegramTopicSchema = z.object({
   requireMention: z.boolean().optional(),
@@ -422,7 +477,7 @@ const SignalAccountSchemaBase = z.object({
   httpUrl: z.string().optional(),
   httpHost: z.string().optional(),
   httpPort: z.number().int().positive().optional(),
-  cliPath: z.string().optional(),
+  cliPath: ExecutableTokenSchema.optional(),
   autoStart: z.boolean().optional(),
   receiveMode: z.union([z.literal("on-start"), z.literal("manual")]).optional(),
   ignoreAttachments: z.boolean().optional(),
@@ -470,7 +525,7 @@ const IMessageAccountSchemaBase = z.object({
   name: z.string().optional(),
   capabilities: z.array(z.string()).optional(),
   enabled: z.boolean().optional(),
-  cliPath: z.string().optional(),
+  cliPath: ExecutableTokenSchema.optional(),
   dbPath: z.string().optional(),
   service: z
     .union([z.literal("imessage"), z.literal("sms"), z.literal("auto")])
@@ -637,6 +692,8 @@ const CommandsSchema = z
   .object({
     native: z.boolean().optional(),
     text: z.boolean().optional(),
+    config: z.boolean().optional(),
+    debug: z.boolean().optional(),
     restart: z.boolean().optional(),
     useAccessGroups: z.boolean().optional(),
   })
@@ -724,6 +781,10 @@ const SandboxBrowserSchema = z
     noVncPort: z.number().int().positive().optional(),
     headless: z.boolean().optional(),
     enableNoVnc: z.boolean().optional(),
+    allowHostControl: z.boolean().optional(),
+    allowedControlUrls: z.array(z.string()).optional(),
+    allowedControlHosts: z.array(z.string()).optional(),
+    allowedControlPorts: z.array(z.number().int().positive()).optional(),
     autoStart: z.boolean().optional(),
     autoStartTimeoutMs: z.number().int().positive().optional(),
   })
@@ -818,6 +879,11 @@ const ToolsSchema = z
   .object({
     allow: z.array(z.string()).optional(),
     deny: z.array(z.string()).optional(),
+    audio: z
+      .object({
+        transcription: ToolsAudioTranscriptionSchema,
+      })
+      .optional(),
     agentToAgent: z
       .object({
         enabled: z.boolean().optional(),
@@ -1007,6 +1073,7 @@ const AgentDefaultsSchema = z
     skipBootstrap: z.boolean().optional(),
     userTimezone: z.string().optional(),
     contextTokens: z.number().int().positive().optional(),
+    cliBackends: z.record(z.string(), CliBackendSchema).optional(),
     contextPruning: z
       .object({
         mode: z
@@ -1308,6 +1375,16 @@ export const ClawdbotSchema = z
                       .optional(),
                   )
                   .optional(),
+                ackReaction: z
+                  .object({
+                    emoji: z.string().optional(),
+                    direct: z.boolean().optional().default(true),
+                    group: z
+                      .enum(["always", "mentions", "never"])
+                      .optional()
+                      .default("mentions"),
+                  })
+                  .optional(),
               })
               .superRefine((value, ctx) => {
                 if (value.dmPolicy !== "open") return;
@@ -1353,6 +1430,16 @@ export const ClawdbotSchema = z
               })
               .optional(),
           )
+          .optional(),
+        ackReaction: z
+          .object({
+            emoji: z.string().optional(),
+            direct: z.boolean().optional().default(true),
+            group: z
+              .enum(["always", "mentions", "never"])
+              .optional()
+              .default("mentions"),
+          })
           .optional(),
       })
       .superRefine((value, ctx) => {

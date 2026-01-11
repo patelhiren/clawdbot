@@ -11,6 +11,24 @@ Start with the FAQ’s [First 60 seconds](/start/faq#first-60-seconds-if-somethi
 
 Provider-specific shortcuts: [/providers/troubleshooting](/providers/troubleshooting)
 
+## Status & Diagnostics
+
+Quick triage commands (in order):
+
+| Command | What it tells you | When to use it |
+|---|---|---|
+| `clawdbot status` | Local summary: OS + update, gateway reachability/mode, daemon, agents/sessions, provider config state | First check, quick overview |
+| `clawdbot status --all` | Full local diagnosis (read-only, pasteable, safe-ish) incl. log tail | When you need to share a debug report |
+| `clawdbot status --deep` | Runs gateway health checks (incl. provider probes; requires reachable gateway) | When “configured” doesn’t mean “working” |
+| `clawdbot gateway status` | Gateway discovery + reachability (local + remote targets) | When you suspect you’re probing the wrong gateway |
+| `clawdbot providers status --probe` | Asks the running gateway for provider status (and optionally probes) | When gateway is reachable but providers misbehave |
+| `clawdbot daemon status` | Supervisor state (launchd/systemd/schtasks), runtime PID/exit, last gateway error | When the daemon “looks loaded” but nothing runs |
+| `clawdbot logs --follow` | Live logs (best signal for runtime issues) | When you need the actual failure reason |
+
+**Sharing output:** prefer `clawdbot status --all` (it redacts tokens). If you paste `clawdbot status`, consider setting `CLAWDBOT_SHOW_SECRETS=0` first (token previews).
+
+See also: [Health checks](/gateway/health) and [Logging](/logging).
+
 ## Common Issues
 
 ### Service Installed but Nothing is Running
@@ -30,8 +48,8 @@ Doctor/daemon will show runtime state (PID/last exit) and log hints.
 - Preferred: `clawdbot logs --follow`
 - File logs (always): `/tmp/clawdbot/clawdbot-YYYY-MM-DD.log` (or your configured `logging.file`)
 - macOS LaunchAgent (if installed): `$CLAWDBOT_STATE_DIR/logs/gateway.log` and `gateway.err.log`
-- Linux systemd (if installed): `journalctl --user -u clawdbot-gateway.service -n 200 --no-pager`
-- Windows: `schtasks /Query /TN "Clawdbot Gateway" /V /FO LIST`
+- Linux systemd (if installed): `journalctl --user -u clawdbot-gateway[-<profile>].service -n 200 --no-pager`
+- Windows: `schtasks /Query /TN "Clawdbot Gateway (<profile>)" /V /FO LIST`
 
 **Enable more logging:**
 - Bump file log detail (persisted JSONL):
@@ -306,7 +324,7 @@ If the gateway is supervised by launchd, killing the PID will just respawn it. S
 ```bash
 clawdbot daemon status
 clawdbot daemon stop
-# Or: launchctl bootout gui/$UID/com.clawdbot.gateway
+# Or: launchctl bootout gui/$UID/com.clawdbot.gateway (replace with com.clawdbot.<profile> if needed)
 ```
 
 **Fix 2: Port is busy (find the listener)**
@@ -342,7 +360,7 @@ clawdbot providers login --verbose
 | Log | Location |
 |-----|----------|
 | Gateway file logs (structured) | `/tmp/clawdbot/clawdbot-YYYY-MM-DD.log` (or `logging.file`) |
-| Gateway service logs (supervisor) | macOS: `$CLAWDBOT_STATE_DIR/logs/gateway.log` + `gateway.err.log` (default: `~/.clawdbot/logs/...`; profiles use `~/.clawdbot-<profile>/logs/...`)<br />Linux: `journalctl --user -u clawdbot-gateway.service -n 200 --no-pager`<br />Windows: `schtasks /Query /TN "Clawdbot Gateway" /V /FO LIST` |
+| Gateway service logs (supervisor) | macOS: `$CLAWDBOT_STATE_DIR/logs/gateway.log` + `gateway.err.log` (default: `~/.clawdbot/logs/...`; profiles use `~/.clawdbot-<profile>/logs/...`)<br />Linux: `journalctl --user -u clawdbot-gateway[-<profile>].service -n 200 --no-pager`<br />Windows: `schtasks /Query /TN "Clawdbot Gateway (<profile>)" /V /FO LIST` |
 | Session files | `$CLAWDBOT_STATE_DIR/agents/<agentId>/sessions/` |
 | Media cache | `$CLAWDBOT_STATE_DIR/media/` |
 | Credentials | `$CLAWDBOT_STATE_DIR/credentials/` |

@@ -10,6 +10,7 @@ export type AuthChoice =
   | "token"
   | "openai-codex"
   | "openai-api-key"
+  | "openrouter-api-key"
   | "codex-cli"
   | "antigravity"
   | "apiKey"
@@ -32,6 +33,7 @@ export type OnboardOptions = {
   flow?: "quickstart" | "advanced";
   workspace?: string;
   nonInteractive?: boolean;
+  reset?: boolean;
   authChoice?: AuthChoice;
   /** Used when `authChoice=token` in non-interactive mode. */
   tokenProvider?: string;
@@ -43,6 +45,7 @@ export type OnboardOptions = {
   tokenExpiresIn?: string;
   anthropicApiKey?: string;
   openaiApiKey?: string;
+  openrouterApiKey?: string;
   geminiApiKey?: string;
   zaiApiKey?: string;
   minimaxApiKey?: string;
