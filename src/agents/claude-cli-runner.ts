@@ -2,12 +2,14 @@ import crypto from "node:crypto";
 import os from "node:os";
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { SkillSnapshot } from "./skills.js";
 import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
+import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
 import { createSubsystemLogger } from "../logging.js";
-import { runCommandWithTimeout } from "../process/exec.js";
+import { runCommandWithTimeout, spawnCommand } from "../process/exec.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveSessionAgentIds } from "./agent-scope.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
@@ -19,6 +21,18 @@ import {
 } from "./pi-embedded-helpers.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
+import { parseClaudeCliStream } from "./claude-cli-stream.js";
+import {
+  buildStreamJsonToolResult,
+  buildStreamJsonUserMessage,
+  buildToolAllowlist,
+  executeToolUse,
+  extractToolUsesFromAssistantLine,
+  parseStreamJsonLine,
+} from "./claude-cli-tool-loop.js";
+import { createClawdbotCodingTools } from "./pi-tools.js";
+import { applySkillEnvOverrides, loadWorkspaceSkillEntries } from "./skills.js";
+
 import {
   filterBootstrapFilesForSession,
   loadWorkspaceBootstrapFiles,
@@ -171,10 +185,21 @@ function buildSystemPrompt(params: {
 function normalizeClaudeCliModel(modelId: string): string {
   const trimmed = modelId.trim();
   if (!trimmed) return "opus";
+
+  // Claude CLI expects shorthand model names (opus|sonnet|haiku). In Clawdbot we
+  // often carry full ids like `anthropic/claude-opus-4-5` or aliases like `opus`.
   const lower = trimmed.toLowerCase();
+
+  // Common full-id forms.
+  if (lower.includes("claude-opus")) return "opus";
+  if (lower.includes("claude-sonnet")) return "sonnet";
+  if (lower.includes("claude-haiku")) return "haiku";
+
+  // Alias / shorthand forms.
   if (lower.startsWith("opus")) return "opus";
   if (lower.startsWith("sonnet")) return "sonnet";
   if (lower.startsWith("haiku")) return "haiku";
+
   return trimmed;
 }
 
@@ -244,11 +269,39 @@ async function runClaudeCliOnce(params: {
   systemPrompt: string;
   timeoutMs: number;
   sessionId: string;
+  toolsByName?: Map<string, AgentTool>;
+  toolAllowlist?: string;
+  onAgentEvent?: (evt: { stream: string; data: Record<string, unknown> }) => void;
+  runId?: string;
 }): Promise<ClaudeCliOutput> {
+  const wantsStream = params.onAgentEvent !== undefined;
+
+  // Only use the tool-loop mode when we actually have tools to run.
+  // Otherwise, prefer the simple runner which reliably terminates.
+  const hasTools = Boolean(params.toolsByName && (params.toolsByName.size ?? 0) > 0);
+  if (
+    wantsStream &&
+    hasTools &&
+    params.toolsByName &&
+    params.toolAllowlist !== undefined
+  ) {
+    return await runClaudeCliWithToolLoop({
+      prompt: params.prompt,
+      workspaceDir: params.workspaceDir,
+      modelId: params.modelId,
+      systemPrompt: params.systemPrompt,
+      timeoutMs: params.timeoutMs,
+      sessionId: params.sessionId,
+      toolsByName: params.toolsByName,
+      toolAllowlist: params.toolAllowlist,
+      onAgentEvent: params.onAgentEvent,
+    });
+  }
+
   const args = [
     "-p",
     "--output-format",
-    "json",
+    wantsStream ? "stream-json" : "json",
     "--model",
     normalizeClaudeCliModel(params.modelId),
     "--append-system-prompt",
@@ -257,10 +310,12 @@ async function runClaudeCliOnce(params: {
     "--session-id",
     params.sessionId,
   ];
-  args.push(params.prompt);
+  if (wantsStream) {
+    args.push("--verbose", "--include-partial-messages");
+  }
 
   log.info(
-    `claude-cli exec: model=${normalizeClaudeCliModel(params.modelId)} promptChars=${params.prompt.length} systemPromptChars=${params.systemPrompt.length}`,
+    `claude-cli exec: model=${normalizeClaudeCliModel(params.modelId)} promptChars=${params.prompt.length} systemPromptChars=${params.systemPrompt.length} stream=${wantsStream}`,
   );
   if (process.env.CLAWDBOT_CLAUDE_CLI_LOG_OUTPUT === "1") {
     const logArgs: string[] = [];
@@ -278,16 +333,13 @@ async function runClaudeCliOnce(params: {
       }
       logArgs.push(arg);
     }
-    const promptIndex = logArgs.indexOf(params.prompt);
-    if (promptIndex >= 0) {
-      logArgs[promptIndex] = `<prompt:${params.prompt.length} chars>`;
-    }
     log.info(`claude-cli argv: claude ${logArgs.join(" ")}`);
   }
 
   const result = await runCommandWithTimeout(["claude", ...args], {
     timeoutMs: params.timeoutMs,
     cwd: params.workspaceDir,
+    input: params.prompt,
     env: (() => {
       const next = { ...process.env };
       delete next.ANTHROPIC_API_KEY;
@@ -314,8 +366,10 @@ async function runClaudeCliOnce(params: {
       log.debug(`claude-cli stderr:\n${result.stderr.trim()}`);
     }
   }
-  if (result.code !== 0) {
-    const err = result.stderr.trim() || stdout || "Claude CLI failed.";
+
+  const maybeHandleNonzero = (out: string) => {
+    if (result.code === 0) return;
+    const err = result.stderr.trim() || out || "Claude CLI failed.";
     if (isFailoverErrorMessage(err)) {
       const reason = classifyFailoverReason(err) ?? "unknown";
       const status = resolveFailoverStatus(reason);
@@ -327,9 +381,33 @@ async function runClaudeCliOnce(params: {
       });
     }
     throw new Error(err);
+  };
+
+  if (!wantsStream) {
+    maybeHandleNonzero(stdout);
+    const parsed = parseClaudeCliJson(stdout);
+    const output = parsed ?? { text: stdout };
+    if (logOutputText) {
+      const text = output.text?.trim();
+      if (text) {
+        log.info(`claude-cli output:\n${text}`);
+      }
+    }
+    return output;
   }
-  const parsed = parseClaudeCliJson(stdout);
-  const output = parsed ?? { text: stdout };
+
+  const { output, rawText } = parseClaudeCliStream({
+    stdout,
+    onAgentEvent: params.onAgentEvent,
+  });
+  maybeHandleNonzero(rawText);
+
+  // Treat the silent-reply token as an intentional "no output" outcome,
+  // not a runtime error.
+  if (isSilentReplyText(output.text, SILENT_REPLY_TOKEN)) {
+    return { ...output, text: "" };
+  }
+
   if (logOutputText) {
     const text = output.text?.trim();
     if (text) {
@@ -339,12 +417,138 @@ async function runClaudeCliOnce(params: {
   return output;
 }
 
+async function runClaudeCliWithToolLoop(params: {
+  prompt: string;
+  workspaceDir: string;
+  modelId: string;
+  systemPrompt: string;
+  timeoutMs: number;
+  sessionId: string;
+  toolsByName: Map<string, AgentTool>;
+  toolAllowlist: string;
+  onAgentEvent?: (evt: { stream: string; data: Record<string, unknown> }) => void;
+}): Promise<ClaudeCliOutput> {
+  const argv = [
+    "claude",
+    "-p",
+    "--verbose",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--model",
+    normalizeClaudeCliModel(params.modelId),
+    "--append-system-prompt",
+    params.systemPrompt,
+    "--dangerously-skip-permissions",
+    "--replay-user-messages",
+    "--session-id",
+    params.sessionId,
+  ];
+  if (params.toolAllowlist.trim()) {
+    argv.push("--tools", params.toolAllowlist);
+  } else {
+    argv.push("--tools", "");
+  }
+  const env = (() => {
+    const next = { ...process.env };
+    delete next.ANTHROPIC_API_KEY;
+    return next;
+  })();
+
+  const handle = spawnCommand(argv, { cwd: params.workspaceDir, env });
+  const child = handle.child;
+  const stdin = child.stdin;
+  if (!stdin) throw new Error("Failed to open stdin for claude");
+
+  const toWrite = buildStreamJsonUserMessage(params.prompt) + "\n";
+  stdin.write(toWrite);
+
+  let stdout = "";
+  let stderr = "";
+  const toolUsesSeen = new Set<string>();
+
+  const maybeExecuteToolsFromLine = async (rawLine: string) => {
+    const obj = parseStreamJsonLine(rawLine);
+    if (!obj) return;
+    for (const toolUse of extractToolUsesFromAssistantLine(obj)) {
+      if (toolUsesSeen.has(toolUse.id)) continue;
+      toolUsesSeen.add(toolUse.id);
+      const result = await executeToolUse({
+        toolsByName: params.toolsByName,
+        toolUse,
+      });
+      stdin.write(
+        buildStreamJsonToolResult({
+          toolUseId: toolUse.id,
+          content: result.content,
+          isError: result.isError,
+        }) + "\n",
+      );
+    }
+  };
+
+  let pending = "";
+  let stdinClosed = false;
+  child.stdout?.on("data", (d) => {
+    const chunk = d.toString();
+    stdout += chunk;
+    pending += chunk;
+    for (;;) {
+      const idx = pending.indexOf("\n");
+      if (idx < 0) break;
+      const line = pending.slice(0, idx);
+      pending = pending.slice(idx + 1);
+
+      // Claude CLI will keep the stream open until stdin closes. Once we see the
+      // final result envelope, close stdin so the process can exit.
+      const parsedLine = parseStreamJsonLine(line);
+      if (parsedLine?.type === "result" && stdin && !stdinClosed) {
+        stdinClosed = true;
+        stdin.end();
+      }
+
+      void maybeExecuteToolsFromLine(line);
+    }
+  });
+  child.stderr?.on("data", (d) => {
+    stderr += d.toString();
+  });
+
+  const timeout = setTimeout(() => {
+    handle.kill("SIGKILL");
+  }, params.timeoutMs);
+
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code, signal) => resolve({ code, signal }));
+  });
+  clearTimeout(timeout);
+
+  // Emit parsed stream events (assistant/tool/lifecycle) using existing parser.
+  const parsed = parseClaudeCliStream({ stdout, onAgentEvent: params.onAgentEvent });
+  // Mirror runCommandWithTimeout signature for error handling/logging.
+  if (result.code !== 0) {
+    const err = stderr.trim() || parsed.rawText || "Claude CLI failed.";
+    if (isFailoverErrorMessage(err)) {
+      const reason = classifyFailoverReason(err) ?? "unknown";
+      const status = resolveFailoverStatus(reason);
+      throw new FailoverError(err, { reason, provider: "claude-cli", model: params.modelId, status });
+    }
+    throw new Error(err);
+  }
+  return parsed.output;
+}
+
 export async function runClaudeCliAgent(params: {
   sessionId: string;
   sessionKey?: string;
   sessionFile: string;
   workspaceDir: string;
+  agentDir?: string;
   config?: ClawdbotConfig;
+  skillsSnapshot?: SkillSnapshot;
   prompt: string;
   provider?: string;
   model?: string;
@@ -354,18 +558,24 @@ export async function runClaudeCliAgent(params: {
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
   claudeSessionId?: string;
+  onAgentEvent?: (evt: { stream: string; data: Record<string, unknown> }) => void;
 }): Promise<EmbeddedPiRunResult> {
   const started = Date.now();
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   const workspaceDir = resolvedWorkspace;
 
+  params.onAgentEvent?.({
+    stream: "lifecycle",
+    data: {
+      phase: "start",
+      startedAt: started,
+    },
+  });
+
   const modelId = (params.model ?? "opus").trim() || "opus";
   const modelDisplay = `${params.provider ?? "claude-cli"}/${modelId}`;
 
-  const extraSystemPrompt = [
-    params.extraSystemPrompt?.trim(),
-    "Tools are disabled in this session. Do not call tools.",
-  ]
+  const extraSystemPrompt = [params.extraSystemPrompt?.trim()]
     .filter(Boolean)
     .join("\n");
 
@@ -396,31 +606,81 @@ export async function runClaudeCliAgent(params: {
     modelDisplay,
   });
 
-  const claudeSessionId = normalizeClaudeSessionId(params.claudeSessionId);
-  const output = await enqueueClaudeCliRun(CLAUDE_CLI_QUEUE_KEY, () =>
-    runClaudeCliOnce({
-      prompt: params.prompt,
+  const resolvedAgentDir = params.agentDir ?? resolveUserPath("~/.clawdbot/agent");
+  const skillEntries = !params.skillsSnapshot || !params.skillsSnapshot.resolvedSkills
+    ? loadWorkspaceSkillEntries(workspaceDir)
+    : [];
+  const restoreSkillEnv = params.skillsSnapshot
+    ? applySkillEnvOverrides({ skills: [], config: params.config })
+    : applySkillEnvOverrides({ skills: skillEntries ?? [], config: params.config });
+  try {
+    const tools = createClawdbotCodingTools({
+      bash: { ...params.config?.tools?.bash },
       workspaceDir,
-      modelId,
-      systemPrompt,
-      timeoutMs: params.timeoutMs,
-      sessionId: claudeSessionId,
-    }),
-  );
+      sessionKey: params.sessionKey ?? params.sessionId,
+      agentDir: resolvedAgentDir,
+      config: params.config,
+      modelProvider: "anthropic",
+    });
+    const toolAllowlist = buildToolAllowlist(tools);
+    const toolsByName = new Map<string, AgentTool>(
+      tools.map((tool) => [tool.name, tool]),
+    );
 
-  const text = output.text?.trim();
-  const payloads = text ? [{ text }] : undefined;
+    const claudeSessionId = normalizeClaudeSessionId(params.claudeSessionId);
+    const output = await enqueueClaudeCliRun(CLAUDE_CLI_QUEUE_KEY, () =>
+      runClaudeCliOnce({
+        prompt: params.prompt,
+        workspaceDir,
+        modelId,
+        systemPrompt,
+        timeoutMs: params.timeoutMs,
+        sessionId: claudeSessionId,
+        runId: params.runId,
+        onAgentEvent: params.onAgentEvent,
+        toolsByName,
+        toolAllowlist,
+      }),
+    );
 
-  return {
-    payloads,
-    meta: {
-      durationMs: Date.now() - started,
-      agentMeta: {
-        sessionId: output.sessionId ?? claudeSessionId,
-        provider: params.provider ?? "claude-cli",
-        model: modelId,
-        usage: output.usage,
+    const text = output.text?.trim();
+    const payloads = text ? [{ text }] : undefined;
+
+    const endedAt = Date.now();
+    params.onAgentEvent?.({
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        startedAt: started,
+        endedAt,
       },
-    },
-  };
+    });
+
+    return {
+      payloads,
+      meta: {
+        durationMs: endedAt - started,
+        agentMeta: {
+          sessionId: output.sessionId ?? claudeSessionId,
+          provider: params.provider ?? "claude-cli",
+          model: modelId,
+          usage: output.usage,
+        },
+      },
+    };
+  } catch (err) {
+    const endedAt = Date.now();
+    params.onAgentEvent?.({
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        startedAt: started,
+        endedAt,
+        error: String(err),
+      },
+    });
+    throw err;
+  } finally {
+    restoreSkillEnv?.();
+  }
 }

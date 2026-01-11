@@ -43,6 +43,28 @@ export type SpawnResult = {
   killed: boolean;
 };
 
+export type SpawnStreamingHandle = {
+  child: ReturnType<typeof spawn>;
+  kill: (signal?: NodeJS.Signals) => void;
+};
+
+export function spawnCommand(argv: string[], options?: {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}): SpawnStreamingHandle {
+  const child = spawn(argv[0], argv.slice(1), {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: options?.cwd,
+    env: options?.env ? { ...process.env, ...options.env } : process.env,
+  });
+  return {
+    child,
+    kill: (signal) => {
+      child.kill(signal ?? "SIGKILL");
+    },
+  };
+}
+
 export type CommandOptions = {
   timeoutMs: number;
   cwd?: string;

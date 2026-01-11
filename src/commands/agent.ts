@@ -439,6 +439,8 @@ export async function agentCommand(
             sessionKey,
             sessionFile,
             workspaceDir,
+            agentDir,
+            skillsSnapshot,
             config: cfg,
             prompt: body,
             provider: providerOverride,
@@ -448,6 +450,20 @@ export async function agentCommand(
             runId,
             extraSystemPrompt: opts.extraSystemPrompt,
             claudeSessionId,
+            onAgentEvent: (evt) => {
+              if (
+                evt.stream === "lifecycle" &&
+                typeof evt.data?.phase === "string" &&
+                (evt.data.phase === "end" || evt.data.phase === "error")
+              ) {
+                lifecycleEnded = true;
+              }
+              emitAgentEvent({
+                runId,
+                stream: evt.stream,
+                data: evt.data,
+              });
+            },
           });
         }
         return runEmbeddedPiAgent({

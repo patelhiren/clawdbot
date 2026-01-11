@@ -88,6 +88,22 @@ function candidateBinDirs(opts: EnsureClawdbotPathOpts): string[] {
   candidates.push(path.join(homeDir, ".local", "share", "pnpm"));
   candidates.push(path.join(homeDir, ".bun", "bin"));
   candidates.push(path.join(homeDir, ".yarn", "bin"));
+
+  // Common Node managers.
+  // NVM: include all installed Node versions so `node`, `pnpm`, etc. work under minimal PATH envs.
+  candidates.push(path.join(homeDir, ".config", "nvm", "versions", "node"));
+  try {
+    const nvmVersionsDir = path.join(homeDir, ".config", "nvm", "versions", "node");
+    if (isDirectory(nvmVersionsDir)) {
+      for (const entry of fs.readdirSync(nvmVersionsDir)) {
+        const binDir = path.join(nvmVersionsDir, entry, "bin");
+        if (isDirectory(binDir)) candidates.push(binDir);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   candidates.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin");
 
   return candidates.filter(isDirectory);
