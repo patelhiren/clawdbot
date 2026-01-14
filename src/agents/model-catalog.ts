@@ -10,6 +10,34 @@ export type ModelCatalogEntry = {
   reasoning?: boolean;
 };
 
+/**
+ * Virtual catalog entries for claude-cli provider.
+ * These map to the shorthand models that Claude CLI accepts (opus, sonnet, haiku).
+ */
+const CLAUDE_CLI_MODELS: ModelCatalogEntry[] = [
+  {
+    id: "opus",
+    name: "Claude Opus 4",
+    provider: "claude-cli",
+    contextWindow: 200000,
+    reasoning: true,
+  },
+  {
+    id: "sonnet",
+    name: "Claude Sonnet 4",
+    provider: "claude-cli",
+    contextWindow: 200000,
+    reasoning: false,
+  },
+  {
+    id: "haiku",
+    name: "Claude Haiku 3.5",
+    provider: "claude-cli",
+    contextWindow: 200000,
+    reasoning: false,
+  },
+];
+
 type DiscoveredModel = {
   id: string;
   name?: string;
@@ -70,6 +98,11 @@ export async function loadModelCatalog(params?: {
     } catch {
       // Leave models empty on discovery errors and don't cache.
       modelCatalogPromise = null;
+    }
+
+    // Append claude-cli virtual models (always available when Claude CLI is installed).
+    for (const entry of CLAUDE_CLI_MODELS) {
+      models.push(entry);
     }
 
     return models.sort((a, b) => {
